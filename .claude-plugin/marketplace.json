@@ -1,0 +1,14 @@
+{
+  "name": "write-as-me",
+  "owner": {
+    "name": "Ken Arakelian",
+    "url": "https://github.com/kenarakelian1"
+  },
+  "plugins": [
+    {
+      "name": "write-as-me",
+      "source": "./",
+      "description": "Learns your email writing style from your sent mail and drafts new email in your voice."
+    }
+  ]
+}

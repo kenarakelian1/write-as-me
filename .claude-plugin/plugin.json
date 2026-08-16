@@ -1,0 +1,12 @@
+{
+  "name": "write-as-me",
+  "version": "0.1.0",
+  "description": "Learns your email writing style from your sent mail and drafts new email in your voice.",
+  "author": {
+    "name": "Ken Arakelian",
+    "url": "https://github.com/kenarakelian1"
+  },
+  "homepage": "https://github.com/kenarakelian1/write-as-me",
+  "license": "MIT",
+  "keywords": ["email", "writing", "style", "voice", "gmail"]
+}
