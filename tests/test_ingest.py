@@ -14,6 +14,7 @@ from ingest import (  # noqa: E402
     dedupe,
     load_eml_dir,
     normalize,
+    strip_quote_containers,
     strip_quoted,
     strip_signature,
 )
@@ -242,3 +243,88 @@ def test_html_nested_blockquote_chain_is_fully_stripped():
     assert "Priya" not in body
     assert "fulfillment numbers" not in body
     assert body == "Works for me."
+
+
+# --- Finding 3 follow-up (reviewer audit): regex could not handle balanced
+# nested/sibling containers correctly. Replaced with a depth-aware
+# html.parser scan. Each case below is one the reviewer specifically
+# exercised against the regex version and found broken.
+
+
+def test_gmail_quote_div_with_sibling_paragraphs_is_fully_stripped():
+    """(a) Gmail's real markup: one class="gmail_quote" <div> containing
+    several sibling <div> paragraphs, not one flat blob. A non-greedy regex
+    backreference-matched to the container's own closing tag stops at the
+    *first* inner </div> and leaks every paragraph after the first."""
+    html_body = (
+        "<div>New content here.</div>"
+        '<div class="gmail_quote">'
+        "<div>Quoted paragraph one from Priya.</div>"
+        "<div>Quoted paragraph two from Priya, with more detail.</div>"
+        "<div>Quoted paragraph three, the sign-off.</div>"
+        "</div>"
+    )
+    text = strip_quote_containers(html_body)
+    assert "Quoted paragraph one" not in text
+    assert "Quoted paragraph two" not in text
+    assert "Quoted paragraph three" not in text
+    assert "New content here." in text
+
+
+def test_user_text_sandwiched_between_two_blockquotes_survives():
+    """(b) A reply in the middle of a forwarded thread: quote, then genuine
+    user prose, then another quote. A greedy regex matching to the *last*
+    closing tag in the document swallows the real prose along with both
+    quotes; this must survive intact while both quotes disappear."""
+    html_body = (
+        '<blockquote class="gmail_quote">'
+        "<div>Old quoted paragraph from last week.</div>"
+        "</blockquote>"
+        "<div>Actually, following up on my note above: let's do Thursday.</div>"
+        '<blockquote class="gmail_quote">'
+        "<div>Another quoted paragraph from Priya.</div>"
+        "</blockquote>"
+    )
+    text = strip_quote_containers(html_body)
+    assert "Old quoted paragraph" not in text
+    assert "Another quoted paragraph" not in text
+    assert "Actually, following up on my note above: let's do Thursday." in text
+
+
+def test_gmail_quote_div_attribute_order_does_not_matter():
+    """class= can appear anywhere among a tag's attributes; the container
+    must be recognized regardless of position."""
+    variants = [
+        '<div class="gmail_quote" id="q1" style="margin:0">QUOTE</div>',
+        '<div id="q1" style="margin:0" class="gmail_quote">QUOTE</div>',
+        '<div style="margin:0" id="q1" class="gmail_quote">QUOTE</div>',
+    ]
+    for html_body in variants:
+        text = strip_quote_containers("Kept text. " + html_body)
+        assert "QUOTE" not in text, html_body
+        assert "Kept text." in text, html_body
+
+
+def test_unclosed_blockquote_strips_to_end_of_input_instead_of_leaking():
+    """Malformed markup with no closing </blockquote> must fail toward
+    stripping too much (treat it as running to end of input), never toward
+    leaking the quoted text back into the corpus."""
+    html_body = (
+        "<div>Real reply text.</div>"
+        '<blockquote class="gmail_quote"><div>Quoted text with no closing tag'
+    )
+    text = strip_quote_containers(html_body)
+    assert "Real reply text." in text
+    assert "Quoted text with no closing tag" not in text
+
+
+def test_entities_are_unescaped_in_surviving_text():
+    html_body = (
+        "<div>Ben &amp; Co. said &quot;yes&quot;&nbsp;&#8212; also &mdash; great.</div>"
+    )
+    text = strip_quote_containers(html_body)
+    assert "&amp;" not in text and "Ben & Co." in text
+    assert "&quot;" not in text and '"yes"' in text
+    assert "&nbsp;" not in text and "\xa0" in text
+    assert "&#8212;" not in text and "—" in text
+    assert "&mdash;" not in text

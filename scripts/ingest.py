@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import mailbox
 import re
@@ -10,6 +9,7 @@ from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
 from email.utils import getaddresses, parsedate_to_datetime
+from html.parser import HTMLParser
 from pathlib import Path
 
 QUOTE_MARKERS = [
@@ -93,32 +93,97 @@ def _looks_like_label(line: str) -> bool:
 
 
 AUTO_HEADERS = ("auto-submitted", "x-autoreply", "x-autorespond")
-TAG_RE = re.compile(r"<[^>]+>")
 
-# Quoted-reply containers must be dropped *before* TAG_RE strips the markup,
-# otherwise the correspondent's quoted text has no HTML tags left to signal
-# "this is a quote" and survives as if it were the user's own prose (the tag
-# strip leaves no literal ">" for strip_quoted's markers to find).
-#
-# <blockquote> is matched greedily (`.*` not `.*?`) on purpose: real reply
-# chains nest <blockquote> inside <blockquote> (replying to a reply), and a
-# lazy match would stop at the *first* closing tag — the innermost one —
-# leaking the outer, older quoted text back into the body. Greedy matching to
-# the *last* </blockquote> in the message correctly swallows the whole nested
-# chain. The trade-off is two independent, non-nested blockquotes with real
-# authored text between them would also get collapsed together; for a corpus
-# whose purpose is "never let a correspondent's words pass as the user's
-# voice," over-stripping a rare structure is the safer failure than under-
-# stripping the common one.
-BLOCKQUOTE_RE = re.compile(r"<blockquote\b[^>]*>.*</blockquote>", re.IGNORECASE | re.DOTALL)
-# Some clients (and forwarded mail) mark the quote container with
-# class="gmail_quote" on a tag other than <blockquote> (typically a <div>).
-# Matched non-greedily against its own tag name via backreference, since
-# these wrappers are not known to nest the way reply-chain blockquotes do.
-GMAIL_QUOTE_RE = re.compile(
-    r"<(\w+)\b[^>]*\bclass=[\"'][^\"']*gmail_quote[^\"']*[\"'][^>]*>.*?</\1>",
-    re.IGNORECASE | re.DOTALL,
-)
+# Void elements never get a matching close tag (HTMLParser calls
+# handle_starttag for them but handle_endtag never follows), so they must
+# never be pushed onto the container-tracking stack below — if they were,
+# the stack would drift out of sync with the real tag nesting on the very
+# first <br> inside a paragraph.
+VOID_ELEMENTS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+}
+
+
+class _QuoteStrippingParser(HTMLParser):
+    """Extract visible text from an HTML email body, dropping <blockquote>
+    elements and any element carrying class="gmail_quote" together with
+    their full contents, at any nesting depth.
+
+    A regex cannot match a balanced, arbitrarily nested container correctly:
+    a non-greedy pattern stops at the *first* inner closing tag — which
+    leaks a quote container's own sibling content (Gmail renders each
+    quoted paragraph as its own <div> inside one class="gmail_quote"
+    wrapper, so a non-greedy match closes after the first paragraph and
+    leaks every paragraph after it). A greedy pattern runs to the *last*
+    closing tag in the whole document — which swallows real user text
+    sandwiched between two independent quote blocks (a reply in the middle
+    of a forwarded thread). Walking the actual tag stream sidesteps both
+    failures: text is only ever emitted while no quote-container tag is
+    currently open, regardless of how many non-quote tags are nested inside
+    or around it.
+
+    An unclosed <blockquote> (malformed markup) is never popped off the
+    stack, so everything after it is treated as still inside it and
+    dropped through end of input — "fail toward stripping more," not
+    toward leaking a truncated quote.
+
+    Entity unescaping (&amp;, &#8212;, &nbsp;, ...) is handled by
+    HTMLParser itself via convert_charrefs=True — decoded text arrives
+    pre-unescaped in handle_data, so no separate html.unescape() step is
+    needed or correct to add on top of this.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._chunks: list[str] = []
+        # One (tag_name, is_quote_container) entry per currently-open,
+        # non-void tag — a stack, so nested/sibling tags of the same name
+        # resolve against the correct opener.
+        self._stack: list[tuple[str, bool]] = []
+
+    @staticmethod
+    def _is_quote_container(tag: str, attrs: list[tuple[str, str | None]]) -> bool:
+        if tag == "blockquote":
+            return True
+        for name, value in attrs:
+            if name == "class" and value and "gmail_quote" in value.split():
+                return True
+        return False
+
+    def _skipping(self) -> bool:
+        return any(is_quote for _, is_quote in self._stack)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # A tag boundary always breaks word-fusion between the text before
+        # and after it, whether or not its content is being skipped — e.g.
+        # "<div>A</div><div>B</div>" must not read back as "AB".
+        self._chunks.append(" ")
+        if tag in VOID_ELEMENTS:
+            return
+        self._stack.append((tag, self._is_quote_container(tag, attrs)))
+
+    def handle_endtag(self, tag: str) -> None:
+        self._chunks.append(" ")
+        for i in range(len(self._stack) - 1, -1, -1):
+            if self._stack[i][0] == tag:
+                del self._stack[i:]
+                return
+        # Unmatched close tag (malformed markup) — nothing to pop; ignore.
+
+    def handle_data(self, data: str) -> None:
+        if not self._skipping():
+            self._chunks.append(data)
+
+    def get_text(self) -> str:
+        return "".join(self._chunks)
+
+
+def strip_quote_containers(raw_html: str) -> str:
+    parser = _QuoteStrippingParser()
+    parser.feed(raw_html)
+    parser.close()
+    return parser.get_text()
 
 
 def is_auto_reply(msg: EmailMessage) -> bool:
@@ -136,11 +201,7 @@ def extract_body(msg: EmailMessage) -> str:
         return part.get_content()
     part = msg.get_body(preferencelist=("html",))
     if part is not None:
-        content = part.get_content()
-        content = BLOCKQUOTE_RE.sub(" ", content)
-        content = GMAIL_QUOTE_RE.sub(" ", content)
-        content = TAG_RE.sub(" ", content)
-        return html.unescape(content)
+        return strip_quote_containers(part.get_content())
     return ""
 
 
