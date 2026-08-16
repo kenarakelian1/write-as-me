@@ -178,6 +178,28 @@ def ask_placement(text: str) -> float | None:
 SMOOTHING = 1e-7
 
 
+def _baseline_freq(phrase: str, base: dict) -> float:
+    """Expected frequency of a phrase in ordinary English.
+
+    Frequency tables are built from apostrophe-free tokens, so "it's", "can't"
+    and "i'm" are absent and fall to the smoothing floor — which made every
+    contraction score as maximally distinctive and crowd real pet phrases out
+    of the ranking entirely. On real data the top five "distinctive phrases"
+    came back as it's / that's / i'm / can't / what's.
+
+    A contraction is not unusual English; it is the apostrophe-free form with
+    an apostrophe. Score it against that form when the exact string is missing.
+    How often someone contracts is already measured by contraction_rate.
+    """
+    if phrase in base:
+        return base[phrase]
+    if "'" in phrase:
+        stripped = phrase.replace("'", "")
+        if stripped in base:
+            return base[stripped]
+    return SMOOTHING
+
+
 def lexicon(messages: list[dict], baseline: dict, top_n: int = 15) -> list[dict]:
     """Rank the user's n-grams by log-odds against a common-English baseline."""
     # Bigrams are built per message and summed, not over one flat word list
@@ -203,7 +225,7 @@ def lexicon(messages: list[dict], baseline: dict, top_n: int = 15) -> list[dict]
             if count < 3:
                 continue
             observed = count / total
-            expected = base.get(phrase, SMOOTHING)
+            expected = _baseline_freq(phrase, base)
             scored.append(
                 {
                     "phrase": phrase,
@@ -235,10 +257,24 @@ def classify_register(msg: dict, user_domain: str, is_first_contact: bool) -> st
     chronological send history.
     """
     domains = msg.get("to_domains") or []
-    if any(d == user_domain for d in domains):
+
+    # A user on a consumer mailbox (gmail.com and friends) has no colleagues at
+    # their own domain, so "shares my domain" cannot mean "internal" for them.
+    # Applying that rule anyway swept every Gmail recipient into `internal`,
+    # made `personal` unreachable, and mislabelled business mail that merely
+    # CC'd one Gmail address. Consultants and freelancers on personal Gmail are
+    # a large share of this plugin's users, so guard the rule rather than
+    # assuming a corporate domain.
+    user_is_consumer = user_domain in CONSUMER_DOMAINS
+    if not user_is_consumer and any(d == user_domain for d in domains):
         return "internal"
-    if any(d in CONSUMER_DOMAINS for d in domains):
+
+    # Business domains decide the register; a consumer address alongside them
+    # (a CC to someone's personal account) must not hijack it.
+    business = [d for d in domains if d not in CONSUMER_DOMAINS and d != user_domain]
+    if not business and any(d in CONSUMER_DOMAINS for d in domains):
         return "personal"
+
     subject = (msg.get("subject") or "").lower()
     if any(hint in subject for hint in VENDOR_HINTS):
         return "vendor"

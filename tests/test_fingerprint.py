@@ -316,3 +316,53 @@ def test_ask_placement_ignores_hyphenated_declaratives():
     closed list."""
     assert ask_placement("Need-to-know basis applies here.") is None
     assert ask_placement("Check-ins are weekly now.") is None
+
+
+# --- Consumer-domain users (defect found on real Gmail data) ---
+
+
+def test_consumer_domain_user_has_no_internal_register():
+    """A user whose own domain is gmail.com has no colleagues at gmail.com.
+    Treating every Gmail recipient as `internal` swallows the whole corpus and
+    makes `personal` unreachable — which is exactly what happened on real data."""
+    msg = {"to_domains": ["gmail.com"], "is_reply": False, "body": "x", "subject": ""}
+    assert classify_register(msg, "gmail.com", True) == "personal"
+
+
+def test_consumer_domain_user_still_classifies_business_mail():
+    msg = {"to_domains": ["acme.com"], "is_reply": False, "body": "x", "subject": ""}
+    assert classify_register(msg, "gmail.com", True) == "cold_outreach"
+    assert classify_register(msg, "gmail.com", False) == "client"
+
+
+def test_cc_to_a_consumer_domain_does_not_hijack_the_register():
+    """A business message that CCs one Gmail address is still business mail."""
+    msg = {"to_domains": ["codediv.com", "gmail.com"], "is_reply": False,
+           "body": "x", "subject": ""}
+    assert classify_register(msg, "gmail.com", False) == "client"
+
+
+def test_corporate_domain_user_keeps_internal_register():
+    msg = {"to_domains": ["northwind-labs.com"], "is_reply": True, "body": "x",
+           "subject": ""}
+    assert classify_register(msg, "northwind-labs.com", False) == "internal"
+
+
+# --- Lexicon must not be dominated by contractions ---
+
+
+def test_contractions_do_not_dominate_the_lexicon():
+    """The frequency baseline holds no apostrophe forms, so every contraction
+    scored against the smoothing floor and ranked as maximally distinctive.
+    "it's" should be scored against "its", not against nothing."""
+    baseline = {
+        "unigrams": {"its": 0.004, "cant": 0.0005, "worth": 0.0000001},
+        # Every bigram present, so bigram scoring cannot mask the unigram
+        # behaviour under test.
+        "bigrams": {"its worth": 0.002, "worth it": 0.002, "it cant": 0.002},
+    }
+    msgs = [{"body": "it's worth it can't"} for _ in range(5)]
+    ranked = lexicon(msgs, baseline, top_n=3)
+    phrases = [x["phrase"] for x in ranked]
+    assert "worth" in phrases, f"real pet phrase crowded out by contractions: {phrases}"
+    assert "it's" not in phrases, f"contraction still ranking as distinctive: {phrases}"

@@ -118,3 +118,38 @@ def test_redact_cli_creates_missing_output_directory(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert out.exists()
+
+
+# --- Bare-name openers (defect found on real mail) ---
+
+
+def test_redacts_bare_name_opener():
+    """`Steven,` on its own line is a greeting, not a sentence. It was the
+    single most common opener in the real corpus (44%) and passed through
+    untouched, leaking the recipient's first name every time."""
+    out = redact("Steven,\nSorry for the late notice but could we reschedule?")
+    assert "Steven" not in out
+    assert "[FIRST]" in out
+
+
+def test_redacts_multi_name_opener():
+    out = redact("Craig, Terri,\n\nI met with the vendor this morning.")
+    assert "Craig" not in out and "Terri" not in out
+    assert out.count("[FIRST]") == 2
+
+
+def test_bare_name_opener_keeps_the_owner():
+    assert "Ken" in redact("Ken,\n\nNote to self.", keep_names={"Ken"})
+
+
+def test_does_not_redact_non_name_openers():
+    """Salutation-shaped lines that are not names must survive, or ordinary
+    prose gets mangled."""
+    for opener in ("Team,", "All,", "Thanks,", "Hi,", "Everyone,"):
+        out = redact(f"{opener}\n\nBody text here.")
+        assert opener.rstrip(",") in out, f"{opener} was wrongly redacted"
+
+
+def test_does_not_redact_a_sentence_that_starts_with_a_capitalized_word():
+    body = "Google, as usual, changed the rules.\n\nMore text."
+    assert "Google" in redact(body)
