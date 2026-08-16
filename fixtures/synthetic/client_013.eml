@@ -1,0 +1,21 @@
+From: Dana Reyes <dana@northwind-labs.com>
+To: Wren Castellano <wren@meridianfoods.com>
+Subject: Data migration window
+Date: Wed, 7 May 2025 08:52:14 -0400
+Message-ID: <client-013@northwind-labs.com>
+Content-Type: text/plain; charset="utf-8"
+
+Hi Wren,
+
+Can we move the migration window to Saturday night instead of Friday?
+Friday's traffic is too heavy to risk the cutover.
+
+We'll need a two-hour freeze on writes either way — I'll send the exact
+window once your team confirms.
+
+Best,
+Dana Reyes
+
+--
+Dana Reyes | Northwind Labs
++1 555 018 2299 | northwind-labs.com

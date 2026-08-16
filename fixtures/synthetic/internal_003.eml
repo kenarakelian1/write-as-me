@@ -1,0 +1,13 @@
+From: Dana Reyes <dana@northwind-labs.com>
+To: Sam Okafor <sam@northwind-labs.com>
+Subject: Server migration
+Date: Wed, 16 Apr 2025 22:14:50 -0400
+Message-ID: <internal-003@northwind-labs.com>
+Content-Type: text/plain; charset="utf-8"
+
+Migration's done! Everything's on the new box and DNS has propagated
+for most regions — a couple of ISPs are still catching up, which is
+normal. Keep an eye on error rates the next few hours — ping me if
+anything spikes or looks off.
+
+— Dana

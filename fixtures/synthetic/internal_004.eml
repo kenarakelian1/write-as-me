@@ -1,0 +1,16 @@
+From: Dana Reyes <dana@northwind-labs.com>
+To: Marcus Webb <marcus@northwind-labs.com>
+Subject: Re: staging config
+Date: Tue, 15 Apr 2025 16:40:11 -0400
+Message-ID: <internal-004@northwind-labs.com>
+Content-Type: text/plain; charset="utf-8"
+
+Pushed the fix — should be live in ten minutes.
+
+— Dana
+
+On Tue, Apr 15, 2025 at 4:02 PM Marcus Webb <marcus@northwind-labs.com> wrote:
+> Did the staging config ever get updated? I'm still seeing the old
+> values in the dashboard.
+>
+> Marcus

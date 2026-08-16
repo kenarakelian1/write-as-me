@@ -154,46 +154,65 @@ State that the corpus is entirely fictional, that no real person's mail is in th
 
 - [ ] **Step 5: Write `scripts/build_baseline.py`**
 
+The baseline must reflect **modern English**, not literary prose. Measuring email
+against 19th-century novels would rank ordinary business vocabulary — "meeting",
+"deadline", "invoice" — as highly distinctive, and every user's "pet phrases" would
+come back as generic office words. The input is therefore a precomputed frequency
+table, not raw text.
+
 ```python
 from __future__ import annotations
 
 import argparse
 import json
 import re
-from collections import Counter
 from pathlib import Path
 
-TOKEN = re.compile(r"[a-z']+")
+TOKEN = re.compile(r"^[a-z']+$")
 
 
-def tokenize(text: str) -> list[str]:
-    return TOKEN.findall(text.lower())
+def read_counts(path: Path, top_n: int, ngram_size: int) -> dict[str, float]:
+    """Read a TSV frequency table: <ngram>\\t<count> per line, already sorted
+    descending by count. Returns relative frequencies."""
+    entries: list[tuple[str, int]] = []
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            parts = line.rstrip("\\n").split("\\t")
+            if len(parts) != 2:
+                continue
+            phrase, raw = parts[0].strip().lower(), parts[1].strip()
+            if not raw.isdigit():
+                continue
+            words = phrase.split()
+            if len(words) != ngram_size or not all(TOKEN.match(w) for w in words):
+                continue
+            entries.append((phrase, int(raw)))
+            if len(entries) >= top_n:
+                break
 
-
-def build(corpus_text: str, top_n: int = 20000) -> dict:
-    words = tokenize(corpus_text)
-    uni = Counter(words)
-    bi = Counter(f"{a} {b}" for a, b in zip(words, words[1:]))
-    uni_total = sum(uni.values()) or 1
-    bi_total = sum(bi.values()) or 1
-    return {
-        "unigrams": {w: c / uni_total for w, c in uni.most_common(top_n)},
-        "bigrams": {g: c / bi_total for g, c in bi.most_common(top_n)},
-    }
+    total = sum(count for _, count in entries) or 1
+    return {phrase: count / total for phrase, count in entries}
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Build an n-gram frequency baseline.")
-    ap.add_argument("--source", required=True, help="Plain-text public-domain corpus")
+    ap = argparse.ArgumentParser(
+        description="Build an n-gram frequency baseline from TSV count tables."
+    )
+    ap.add_argument("--unigrams", required=True, help="TSV: word<TAB>count")
+    ap.add_argument("--bigrams", required=True, help="TSV: 'w1 w2'<TAB>count")
     ap.add_argument("--out", required=True)
     ap.add_argument("--top-n", type=int, default=20000)
     args = ap.parse_args()
 
-    text = Path(args.source).read_text(encoding="utf-8", errors="replace")
-    Path(args.out).write_text(
-        json.dumps(build(text, args.top_n), indent=0), encoding="utf-8"
+    baseline = {
+        "unigrams": read_counts(Path(args.unigrams), args.top_n, 1),
+        "bigrams": read_counts(Path(args.bigrams), args.top_n, 2),
+    }
+    Path(args.out).write_text(json.dumps(baseline), encoding="utf-8")
+    print(
+        f"wrote {args.out}: {len(baseline['unigrams'])} unigrams, "
+        f"{len(baseline['bigrams'])} bigrams"
     )
-    print(f"wrote {args.out}")
     return 0
 
 
@@ -203,11 +222,25 @@ if __name__ == "__main__":
 
 - [ ] **Step 6: Generate the baseline**
 
-Source text must be public domain. Use a concatenation of Project Gutenberg plain-text works (any several novels totalling >1M words) downloaded manually to a scratch path — the script itself makes no network calls.
+Source: Peter Norvig's frequency tables derived from the Google Web Trillion Word
+Corpus — modern web English, correctly licensed (the underlying Google data is
+CC BY 3.0), and already in the TSV shape the script expects.
 
-Run: `python scripts/build_baseline.py --source <scratch>/pd_corpus.txt --out fixtures/baseline_ngrams.json`
+Download to the scratch directory, not into the repo:
 
-Verify the file is under 3 MB. If larger, lower `--top-n` to 10000 and regenerate.
+```bash
+curl -sL https://norvig.com/ngrams/count_1w.txt -o <scratch>/count_1w.txt
+curl -sL https://norvig.com/ngrams/count_2w.txt -o <scratch>/count_2w.txt
+python scripts/build_baseline.py --unigrams <scratch>/count_1w.txt \
+  --bigrams <scratch>/count_2w.txt --out fixtures/baseline_ngrams.json
+```
+
+Verify the committed file is under 3 MB. If larger, lower `--top-n` to 10000 and
+regenerate. Record the source and its CC BY 3.0 attribution in
+`fixtures/README.md`, which you must also create.
+
+If both URLs are unreachable, report BLOCKED rather than substituting a literary
+corpus — the modern-English property is the point of this step.
 
 - [ ] **Step 7: Write the fixture integrity test**
 
@@ -247,13 +280,22 @@ def test_baseline_shape():
     data = json.loads((FIXTURES / "baseline_ngrams.json").read_text(encoding="utf-8"))
     assert set(data) == {"unigrams", "bigrams"}
     assert len(data["unigrams"]) >= 5000
+    assert len(data["bigrams"]) >= 5000
     assert data["unigrams"]["the"] > data["unigrams"].get("nevertheless", 0)
+
+
+def test_baseline_is_modern_english():
+    """A literary-prose baseline would rank ordinary business words as
+    distinctive. Common workplace vocabulary must be present and non-trivial."""
+    data = json.loads((FIXTURES / "baseline_ngrams.json").read_text(encoding="utf-8"))
+    for word in ("email", "online", "website", "meeting"):
+        assert data["unigrams"].get(word, 0) > 0, f"{word} missing from baseline"
 ```
 
 - [ ] **Step 8: Run the tests**
 
 Run: `python -m pytest tests/test_fixtures.py -v`
-Expected: 4 passed. If `test_corpus_size` fails, you wrote the wrong number of `.eml` files.
+Expected: 5 passed. If `test_corpus_size` fails, you wrote the wrong number of `.eml` files.
 
 - [ ] **Step 9: Commit**
 
@@ -804,7 +846,12 @@ import statistics
 from collections import Counter
 from pathlib import Path
 
-ABBREV = r"(?<!\bDr)(?<!\bMr)(?<!\bMrs)(?<!\bMs)(?<!\bSt)(?<!\bp\.m)(?<!\ba\.m)(?<!\be\.g)(?<!\bi\.e)"
+# Each lookbehind must include the trailing period: the split point sits AFTER
+# the ".", so "(?<!\bDr)" would inspect "r." and never fire.
+ABBREV = (
+    r"(?<!\bDr\.)(?<!\bMr\.)(?<!\bMrs\.)(?<!\bMs\.)(?<!\bSt\.)"
+    r"(?<!\bp\.m\.)(?<!\ba\.m\.)(?<!\be\.g\.)(?<!\bi\.e\.)"
+)
 SENTENCE_END = re.compile(ABBREV + r"(?<=[.!?])\s+(?=[A-Z0-9])")
 WORD = re.compile(r"[A-Za-z']+")
 
@@ -1030,13 +1077,23 @@ from fingerprint import lexicon  # add to the import block
 
 
 def test_lexicon_surfaces_distinctive_phrases():
+    """Every word in the sample must appear in the baseline except the
+    distinctive ones. An absent word scores near-infinite log-odds against the
+    smoothing floor, which would drown out the phrase under test."""
     baseline = {
-        "unigrams": {"the": 0.05, "a": 0.03, "worth": 0.0001, "look": 0.0002},
-        "bigrams": {"of the": 0.002, "worth a": 0.000001},
+        "unigrams": {
+            "the": 0.05, "a": 0.03, "at": 0.02, "numbers": 0.001,
+            "worth": 0.0000001, "look": 0.0000002,
+        },
+        "bigrams": {
+            "at the": 0.002, "the numbers": 0.001, "a look": 0.0009,
+            "look at": 0.002, "numbers worth": 0.0005,
+            "worth a": 0.0000001,
+        },
     }
     msgs = [{"body": "worth a look at the numbers"} for _ in range(10)]
-    phrases = [item["phrase"] for item in lexicon(msgs, baseline, top_n=5)]
-    assert "worth" in phrases or "worth a" in phrases
+    phrases = [item["phrase"] for item in lexicon(msgs, baseline, top_n=4)]
+    assert "worth" in phrases
     assert "the" not in phrases
 ```
 
@@ -1107,7 +1164,8 @@ git commit -m "feat: core style metrics — shape, openers, mechanics, stance, l
 **Interfaces:**
 - Consumes: everything from Task 3.
 - Produces:
-  - `classify_register(msg: dict, user_domain: str) -> str` → one of `"internal"`, `"client"`, `"cold_outreach"`, `"vendor"`, `"personal"`
+  - `classify_register(msg: dict, user_domain: str, is_first_contact: bool) -> str` → one of `"internal"`, `"client"`, `"cold_outreach"`, `"vendor"`, `"personal"`
+  - `assign_registers(messages: list[dict], user_domain: str) -> dict[str, str]` → message id to register, deriving first contact corpus-wide
   - `aggregate(messages: list[dict], baseline: dict) -> dict` → full metric block for a message set
   - `select_exemplars(messages: list[dict], count: int = 4) -> list[dict]`
   - CLI: `python scripts/fingerprint.py --corpus corpus.json --baseline fixtures/baseline_ngrams.json --out fingerprint.json --exemplars exemplars.json`
@@ -1117,29 +1175,31 @@ git commit -m "feat: core style metrics — shape, openers, mechanics, stance, l
 - [ ] **Step 1: Write failing tests for register classification**
 
 ```python
-from fingerprint import aggregate, classify_register, select_exemplars  # add to imports
+from fingerprint import (  # add to imports
+    aggregate, assign_registers, classify_register, select_exemplars,
+)
 
 USER_DOMAIN = "northwind-labs.com"
 
 
 def test_classify_internal():
     msg = {"to_domains": ["northwind-labs.com"], "is_reply": True, "body": "x"}
-    assert classify_register(msg, USER_DOMAIN) == "internal"
+    assert classify_register(msg, USER_DOMAIN, False) == "internal"
 
 
 def test_classify_personal_consumer_domain():
     msg = {"to_domains": ["gmail.com"], "is_reply": False, "body": "x"}
-    assert classify_register(msg, USER_DOMAIN) == "personal"
+    assert classify_register(msg, USER_DOMAIN, True) == "personal"
 
 
 def test_classify_cold_outreach_is_non_reply_external():
     msg = {"to_domains": ["harborline.com"], "is_reply": False, "body": "x"}
-    assert classify_register(msg, USER_DOMAIN) == "cold_outreach"
+    assert classify_register(msg, USER_DOMAIN, True) == "cold_outreach"
 
 
 def test_classify_client_is_external_reply():
     msg = {"to_domains": ["harborline.com"], "is_reply": True, "body": "x"}
-    assert classify_register(msg, USER_DOMAIN) == "client"
+    assert classify_register(msg, USER_DOMAIN, False) == "client"
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -1159,7 +1219,11 @@ MIN_REGISTER_SIZE = 8
 MIN_CORPUS_SIZE = 12
 
 
-def classify_register(msg: dict, user_domain: str) -> str:
+def classify_register(msg: dict, user_domain: str, is_first_contact: bool) -> str:
+    """First contact is decided corpus-wide by assign_registers, not from this
+    message alone. The spec defines cold outreach as "no prior thread from that
+    address" — a fresh subject line to a long-standing client is NOT cold
+    outreach, so `is_reply` must never be the primary signal."""
     domains = msg.get("to_domains") or []
     if any(d == user_domain for d in domains):
         return "internal"
@@ -1168,14 +1232,37 @@ def classify_register(msg: dict, user_domain: str) -> str:
     subject = (msg.get("subject") or "").lower()
     if any(hint in subject for hint in VENDOR_HINTS):
         return "vendor"
-    return "client" if msg.get("is_reply") else "cold_outreach"
+    return "cold_outreach" if is_first_contact else "client"
+
+
+def assign_registers(messages: list[dict], user_domain: str) -> dict[str, str]:
+    """Map message id -> register, deriving first contact from the corpus.
+
+    Walks chronologically, tracking which external recipient domains have been
+    seen. A message is first contact only when EVERY external domain on it is
+    new; if it includes any established domain it is client correspondence.
+    Undated messages sort last so they can never steal first-contact status.
+    """
+    ordered = sorted(messages, key=lambda m: (m.get("date", "") == "", m.get("date", "")))
+    seen: set[str] = set()
+    assigned: dict[str, str] = {}
+    for msg in ordered:
+        external = [
+            d for d in (msg.get("to_domains") or [])
+            if d != user_domain and d not in CONSUMER_DOMAINS
+        ]
+        is_first_contact = bool(external) and all(d not in seen for d in external)
+        assigned[msg["id"]] = classify_register(msg, user_domain, is_first_contact)
+        seen.update(external)
+    return assigned
 
 
 def aggregate(messages: list[dict], baseline: dict) -> dict:
     joined = "\n\n".join(m["body"] for m in messages)
     openers = Counter(opener_pattern(m["body"]) for m in messages)
-    closers = Counter(closer_pattern(m["body"])["signoff"] for m in messages)
-    name_forms = Counter(closer_pattern(m["body"])["name_form"] for m in messages)
+    closer_data = [closer_pattern(m["body"]) for m in messages]
+    closers = Counter(c["signoff"] for c in closer_data)
+    name_forms = Counter(c["name_form"] for c in closer_data)
     placements = [
         p for p in (ask_placement(m["body"]) for m in messages) if p is not None
     ]
@@ -1304,8 +1391,9 @@ def main() -> int:
 
     user_domain = corpus["user"].split("@", 1)[1].lower()
     buckets: dict[str, list[dict]] = {}
+    assigned = assign_registers(messages, user_domain)
     for msg in messages:
-        buckets.setdefault(classify_register(msg, user_domain), []).append(msg)
+        buckets.setdefault(assigned[msg["id"]], []).append(msg)
 
     registers, suppressed = {}, {}
     for name, group in buckets.items():
@@ -1954,13 +2042,22 @@ def test_compare_returns_absolute_deltas():
     assert compare(a, b)["contraction_rate"] == pytest.approx(0.3)
 
 
-def test_verdict_passes_when_profile_is_closer_on_most_metrics():
+def test_verdict_fails_just_below_threshold():
+    """2 of 3 is a 0.667 share — under the 0.7 bar, so this must not pass."""
     profile = {"m1": 0.1, "m2": 0.1, "m3": 0.5}
     control = {"m1": 0.9, "m2": 0.9, "m3": 0.1}
     result = verdict(profile, control)
     assert result["metrics_compared"] == 3
     assert result["profile_closer"] == 2
-    assert result["pass"] is False  # 0.67 share, below the 0.7 bar
+    assert result["pass"] is False
+
+
+def test_verdict_passes_when_profile_wins_enough():
+    profile = {"m1": 0.1, "m2": 0.1, "m3": 0.1, "m4": 0.9}
+    control = {"m1": 0.9, "m2": 0.9, "m3": 0.9, "m4": 0.1}
+    result = verdict(profile, control)
+    assert result["share"] == 0.75
+    assert result["pass"] is True
 
 
 def test_verdict_fails_when_control_wins():
@@ -2058,7 +2155,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run to verify tests pass**
 
 Run: `python -m pytest tests/test_eval.py -v`
-Expected: 4 passed.
+Expected: 5 passed.
 
 - [ ] **Step 5: Document the eval procedure in `README.md`**
 
