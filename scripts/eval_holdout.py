@@ -34,14 +34,32 @@ def compare(a: dict, b: dict) -> dict:
 
 
 def verdict(profile_deltas: dict, control_deltas: dict) -> dict:
+    """Win rate excluding ties.
+
+    A tied metric (profile delta == control delta — e.g. both are 0 because
+    neither the original, the profile draft, nor the control used a
+    semicolon) is not evidence against the profile: no draft, however
+    perfect, could have "won" a metric where the control was already exactly
+    as close as the truth. Counting ties in the denominator makes the pass
+    bar unreachable whenever a corpus has several legitimately zero-rate
+    metrics, independent of draft quality. Ties are therefore reported (see
+    "ties" below) but excluded from the share computed.
+    """
     shared = profile_deltas.keys() & control_deltas.keys()
     closer = sum(1 for k in shared if profile_deltas[k] < control_deltas[k])
-    share = closer / len(shared) if shared else 0.0
+    opposed = sum(1 for k in shared if control_deltas[k] < profile_deltas[k])
+    ties = len(shared) - closer - opposed
+    decided = closer + opposed
+    share = round(closer / decided, 3) if decided else None
     return {
         "metrics_compared": len(shared),
         "profile_closer": closer,
-        "share": round(share, 3),
-        "pass": share >= PASS_THRESHOLD,
+        "control_closer": opposed,
+        "ties": ties,
+        "share": share,
+        # None (not True/False) when there is no decided metric to judge by:
+        # neither a pass nor a meaningful fail, just no signal.
+        "pass": (share >= PASS_THRESHOLD) if share is not None else None,
     }
 
 
@@ -68,6 +86,15 @@ def main() -> int:
     print("\nLargest remaining gaps:")
     for metric, delta in worst:
         print(f"  {metric}: {delta:.3f}")
+
+    if result["pass"] is None:
+        print(
+            "\nInsufficient signal: every compared metric tied "
+            f"({result['ties']}/{result['metrics_compared']}). "
+            "Neither a pass nor a fail — widen the holdout or the drafts so "
+            "some metrics actually differ."
+        )
+        return 2
     return 0 if result["pass"] else 1
 
 

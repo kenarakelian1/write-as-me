@@ -94,19 +94,32 @@ compares profile-guided drafts against messages the profile was never
 trained on, and against a control drafted with no profile at all, using
 the same metrics `fingerprint.py` computes. It passes when the
 profile-guided drafts land closer to the held-out originals than the
-control does on at least 70% of compared metrics.
+control does on at least 70% of the metrics that actually differed between
+the two (metrics where both tied — commonly a punctuation mark neither side
+used — are reported separately and don't count toward or against the pass
+bar, since a tie is not evidence either way).
 
 Procedure:
 
 1. Run analyze mode with `--keep-cache`.
-2. Move 5 messages out of `corpus.json` into `holdout.json`; re-run
-   `fingerprint.py` on the remainder and regenerate the profile.
+2. Move 5 messages out of `corpus.json` into `holdout.json`, **all drawn from
+   a single register** (e.g. all 5 client, or all 5 internal) — length norms
+   differ by register (a 40-word client email and a 90-word cold-outreach
+   email are both correct in their own register), so mixing registers in
+   one holdout averages them into a blended "truth" that penalizes a
+   register-correct draft for not matching a length no single register
+   actually has. Re-run `fingerprint.py` on the remainder and regenerate the
+   profile.
 3. For each held-out message, ask `/wam` to draft from its subject plus a
    one-line intent, without showing it the original. Collect drafts into
    `drafts.json` using the corpus message shape.
 4. Repeat with a fresh session and no profile loaded to build `control.json`.
 5. Run `eval_holdout.py`. It exits 0 when the profile-guided drafts are
-   closer to the originals than the control on at least 70% of metrics.
+   closer to the originals than the control on at least 70% of the metrics
+   where the two differed (tied metrics — e.g. both at 0 semicolons — are
+   reported but excluded from that share, since a tie is not evidence either
+   way). It exits 2 if every metric tied: that means the holdout was too
+   uniform to say anything, not that the profile passed or failed.
 
 ```bash
 python scripts/eval_holdout.py \
@@ -116,10 +129,13 @@ python scripts/eval_holdout.py \
   --baseline fixtures/baseline_ngrams.json
 ```
 
-It prints the verdict (`metrics_compared`, `profile_closer`, `share`,
-`pass`) as JSON, plus the five metrics with the largest remaining gap
-between the profile-guided drafts and the originals, and exits 1 on a
-failing verdict so it can gate CI or a release checklist.
+It prints the verdict (`metrics_compared`, `profile_closer`,
+`control_closer`, `ties`, `share`, `pass`) as JSON, plus the five metrics
+with the largest remaining gap between the profile-guided drafts and the
+originals. Exit code is 0 on a passing verdict, 1 on a failing one, and 2
+when every compared metric tied — that last case means the sample gave no
+directional signal at all, not that the profile passed or failed, so
+treat it as "run a bigger holdout," not as either verdict.
 
 ## Development
 
