@@ -212,6 +212,23 @@ nothing in the request disambiguates them. Never ask about tone, formality, or "
 would you like this to sound" — the profile already answers that; asking would be
 interrogating the user about something the profile exists to settle.
 
+**Missing recipient name.** Register selection above only needs a relationship, not a
+name — "the vendor," "my manager," "an existing client" is enough to resolve
+`internal` vs. `client` vs. `cold_outreach` without ever learning who the email is to.
+But the register's opener may still call for a name (e.g. "Hi [Name],"), and if the
+trigger never supplied one, do not invent one to fill it in. In order:
+1. If the profile attests a genuine greeting-free opener for this register (a real
+   `none` rate, not the leftover remainder from a `hi_name` majority), draft without a
+   greeting — the missing name is a non-issue.
+2. Otherwise, ask for it. This is allowed to be the one question the paragraph above
+   permits, not an addition to it — if register and name are both unclear, resolve
+   both with a single question rather than two.
+3. If you aren't asking (the question budget went to the register instead, or the
+   user asked for the draft without interruption), use the literal placeholder
+   `Hi [Name],` in the draft. A placeholder is honest about what's missing; a
+   plausible-sounding invented name is not, and it is never a substitute for one of
+   the two paths above.
+
 If the chosen register is in the profile's "too thin to profile" list, say so, fall
 back to the baseline directives, and flag the draft as unregistered when you present it.
 
@@ -291,6 +308,14 @@ doesn't name one.
    says for structure (e.g. "never uses bullet points" becomes short prose sentences
    or a colon-led fragment instead), even when a bulleted list is the obvious default
    for the content.
+9. **No invented specifics.** This generalizes item 4's rule beyond asks: every proper
+   noun and concrete fact in the draft — a recipient's name, a company name, a date, a
+   figure, a project name — must trace to one of three sources: the user's triggering
+   request, the profile itself (the owner's own name, a phrase from the lexicon), or
+   the placeholder conventions in Step 2 (`Hi [Name],`, `[COMPANY]`). If a name, date,
+   or number appears anywhere in the draft that doesn't trace to one of those, it was
+   invented — pull it and use a placeholder or ask, the same discipline as item 4.
+   Matching the voice never licenses inventing the content.
 
 If any check fails, fix it and re-run the full list from item 1 — don't spot-fix one
 item and assume the rest still hold; a fix to length or structure can undo an opener
