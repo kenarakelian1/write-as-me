@@ -253,45 +253,63 @@ On Tue, Apr 15, 2025 at 4:02 PM Marcus Webb &lt;marcus@northwind-labs.com&gt; wr
 <ul>
 <li>[ ] <strong>Step 5: Write <code>scripts/build_baseline.py</code></strong></li>
 </ul>
+<p>The baseline must reflect <strong>modern English</strong>, not literary prose. Measuring email
+against 19th-century novels would rank ordinary business vocabulary — &quot;meeting&quot;,
+&quot;deadline&quot;, &quot;invoice&quot; — as highly distinctive, and every user's &quot;pet phrases&quot; would
+come back as generic office words. The input is therefore a precomputed frequency
+table, not raw text.</p>
 <pre><code class="language-python">from __future__ import annotations
 
 import argparse
 import json
 import re
-from collections import Counter
 from pathlib import Path
 
-TOKEN = re.compile(r&quot;[a-z']+&quot;)
+TOKEN = re.compile(r&quot;^[a-z']+$&quot;)
 
 
-def tokenize(text: str) -&gt; list[str]:
-    return TOKEN.findall(text.lower())
+def read_counts(path: Path, top_n: int, ngram_size: int) -&gt; dict[str, float]:
+    &quot;&quot;&quot;Read a TSV frequency table: &lt;ngram&gt;\\t&lt;count&gt; per line, already sorted
+    descending by count. Returns relative frequencies.&quot;&quot;&quot;
+    entries: list[tuple[str, int]] = []
+    with path.open(encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;) as handle:
+        for line in handle:
+            parts = line.rstrip(&quot;\\n&quot;).split(&quot;\\t&quot;)
+            if len(parts) != 2:
+                continue
+            phrase, raw = parts[0].strip().lower(), parts[1].strip()
+            if not raw.isdigit():
+                continue
+            words = phrase.split()
+            if len(words) != ngram_size or not all(TOKEN.match(w) for w in words):
+                continue
+            entries.append((phrase, int(raw)))
+            if len(entries) &gt;= top_n:
+                break
 
-
-def build(corpus_text: str, top_n: int = 20000) -&gt; dict:
-    words = tokenize(corpus_text)
-    uni = Counter(words)
-    bi = Counter(f&quot;{a} {b}&quot; for a, b in zip(words, words[1:]))
-    uni_total = sum(uni.values()) or 1
-    bi_total = sum(bi.values()) or 1
-    return {
-        &quot;unigrams&quot;: {w: c / uni_total for w, c in uni.most_common(top_n)},
-        &quot;bigrams&quot;: {g: c / bi_total for g, c in bi.most_common(top_n)},
-    }
+    total = sum(count for _, count in entries) or 1
+    return {phrase: count / total for phrase, count in entries}
 
 
 def main() -&gt; int:
-    ap = argparse.ArgumentParser(description=&quot;Build an n-gram frequency baseline.&quot;)
-    ap.add_argument(&quot;--source&quot;, required=True, help=&quot;Plain-text public-domain corpus&quot;)
+    ap = argparse.ArgumentParser(
+        description=&quot;Build an n-gram frequency baseline from TSV count tables.&quot;
+    )
+    ap.add_argument(&quot;--unigrams&quot;, required=True, help=&quot;TSV: word&lt;TAB&gt;count&quot;)
+    ap.add_argument(&quot;--bigrams&quot;, required=True, help=&quot;TSV: 'w1 w2'&lt;TAB&gt;count&quot;)
     ap.add_argument(&quot;--out&quot;, required=True)
     ap.add_argument(&quot;--top-n&quot;, type=int, default=20000)
     args = ap.parse_args()
 
-    text = Path(args.source).read_text(encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;)
-    Path(args.out).write_text(
-        json.dumps(build(text, args.top_n), indent=0), encoding=&quot;utf-8&quot;
+    baseline = {
+        &quot;unigrams&quot;: read_counts(Path(args.unigrams), args.top_n, 1),
+        &quot;bigrams&quot;: read_counts(Path(args.bigrams), args.top_n, 2),
+    }
+    Path(args.out).write_text(json.dumps(baseline), encoding=&quot;utf-8&quot;)
+    print(
+        f&quot;wrote {args.out}: {len(baseline['unigrams'])} unigrams, &quot;
+        f&quot;{len(baseline['bigrams'])} bigrams&quot;
     )
-    print(f&quot;wrote {args.out}&quot;)
     return 0
 
 
@@ -301,9 +319,20 @@ if __name__ == &quot;__main__&quot;:
 <ul>
 <li>[ ] <strong>Step 6: Generate the baseline</strong></li>
 </ul>
-<p>Source text must be public domain. Use a concatenation of Project Gutenberg plain-text works (any several novels totalling &gt;1M words) downloaded manually to a scratch path — the script itself makes no network calls.</p>
-<p>Run: <code>python scripts/build_baseline.py --source &lt;scratch&gt;/pd_corpus.txt --out fixtures/baseline_ngrams.json</code></p>
-<p>Verify the file is under 3 MB. If larger, lower <code>--top-n</code> to 10000 and regenerate.</p>
+<p>Source: Peter Norvig's frequency tables derived from the Google Web Trillion Word
+Corpus — modern web English, correctly licensed (the underlying Google data is
+CC BY 3.0), and already in the TSV shape the script expects.</p>
+<p>Download to the scratch directory, not into the repo:</p>
+<pre><code class="language-bash">curl -sL https://norvig.com/ngrams/count_1w.txt -o &lt;scratch&gt;/count_1w.txt
+curl -sL https://norvig.com/ngrams/count_2w.txt -o &lt;scratch&gt;/count_2w.txt
+python scripts/build_baseline.py --unigrams &lt;scratch&gt;/count_1w.txt \
+  --bigrams &lt;scratch&gt;/count_2w.txt --out fixtures/baseline_ngrams.json
+</code></pre>
+<p>Verify the committed file is under 3 MB. If larger, lower <code>--top-n</code> to 10000 and
+regenerate. Record the source and its CC BY 3.0 attribution in
+<code>fixtures/README.md</code>, which you must also create.</p>
+<p>If both URLs are unreachable, report BLOCKED rather than substituting a literary
+corpus — the modern-English property is the point of this step.</p>
 <ul>
 <li>[ ] <strong>Step 7: Write the fixture integrity test</strong></li>
 </ul>
@@ -342,13 +371,22 @@ def test_baseline_shape():
     data = json.loads((FIXTURES / &quot;baseline_ngrams.json&quot;).read_text(encoding=&quot;utf-8&quot;))
     assert set(data) == {&quot;unigrams&quot;, &quot;bigrams&quot;}
     assert len(data[&quot;unigrams&quot;]) &gt;= 5000
+    assert len(data[&quot;bigrams&quot;]) &gt;= 5000
     assert data[&quot;unigrams&quot;][&quot;the&quot;] &gt; data[&quot;unigrams&quot;].get(&quot;nevertheless&quot;, 0)
+
+
+def test_baseline_is_modern_english():
+    &quot;&quot;&quot;A literary-prose baseline would rank ordinary business words as
+    distinctive. Common workplace vocabulary must be present and non-trivial.&quot;&quot;&quot;
+    data = json.loads((FIXTURES / &quot;baseline_ngrams.json&quot;).read_text(encoding=&quot;utf-8&quot;))
+    for word in (&quot;email&quot;, &quot;online&quot;, &quot;website&quot;, &quot;meeting&quot;):
+        assert data[&quot;unigrams&quot;].get(word, 0) &gt; 0, f&quot;{word} missing from baseline&quot;
 </code></pre>
 <ul>
 <li>[ ] <strong>Step 8: Run the tests</strong></li>
 </ul>
 <p>Run: <code>python -m pytest tests/test_fixtures.py -v</code>
-Expected: 4 passed. If <code>test_corpus_size</code> fails, you wrote the wrong number of <code>.eml</code> files.</p>
+Expected: 5 passed. If <code>test_corpus_size</code> fails, you wrote the wrong number of <code>.eml</code> files.</p>
 <ul>
 <li>[ ] <strong>Step 9: Commit</strong></li>
 </ul>
