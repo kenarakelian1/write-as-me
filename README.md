@@ -57,7 +57,14 @@ Analyze mode tries these in order and tells you which one it used:
 
 Whichever tier supplies the raw messages, the same pipeline processes them:
 `scripts/ingest.py` strips quoted replies and signatures and normalizes
-each message to a common shape; `scripts/fingerprint.py` computes the
+each message to a common shape. It also discards mail you did not
+actually write to anyone — messages addressed only to yourself (automated
+reports, deadline alerts, saved links) and machine-generated bodies
+(calendar invites, link-only notes). On a real mailbox these can outnumber
+genuine correspondence, and left in they teach the profile to imitate your
+reporting scripts rather than your writing. Nothing is dropped silently:
+the counts are printed and recorded in `stats`. Then
+`scripts/fingerprint.py` computes the
 style metrics and buckets messages into registers (internal, client,
 cold outreach, personal, vendor) when there are at least 8 messages in a
 bucket; `scripts/redact.py` strips PII (emails, phone numbers, URLs,

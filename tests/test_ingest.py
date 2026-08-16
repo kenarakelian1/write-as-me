@@ -10,8 +10,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
+from email.message import EmailMessage  # noqa: E402
+
 from ingest import (  # noqa: E402
     dedupe,
+    is_machine_generated,
+    is_self_addressed,
     load_eml_dir,
     normalize,
     strip_quote_containers,
@@ -328,3 +332,88 @@ def test_entities_are_unescaped_in_surviving_text():
     assert "&nbsp;" not in text and "\xa0" in text
     assert "&#8212;" not in text and "—" in text
     assert "&mdash;" not in text
+
+
+# --- Machine-generated and self-addressed mail (found on real Gmail data) ---
+
+
+def _msg(to, subject, body, cc="", frm="Ken <me@example.com>"):
+    m = EmailMessage()
+    m["From"] = frm
+    m["To"] = to
+    if cc:
+        m["Cc"] = cc
+    m["Subject"] = subject
+    m["Date"] = "Thu, 6 Aug 2026 09:50:06 -0400"
+    m["Message-ID"] = "<t@example.com>"
+    m.set_content(body)
+    return m
+
+
+def test_self_addressed_mail_is_dropped():
+    """Automated reports and notes-to-self are not correspondence. On a real
+    mailbox these dominated the sent folder and would teach the profile to
+    imitate the user's reporting scripts."""
+    m = _msg("me@example.com", "[Daily] review - 2026-08-16",
+             "HEADLINE: a new order arrived. 7-day tally is 3 purchases.")
+    assert is_self_addressed(m, "me@example.com") is True
+
+
+def test_mail_to_self_and_others_is_kept():
+    m = _msg("colleague@acme.com, me@example.com", "transfer funds",
+             "Lets transfer the shopify balance to BofA")
+    assert is_self_addressed(m, "me@example.com") is False
+
+
+def test_calendar_invite_is_machine_generated():
+    m = _msg("craig@acme.com", "Craig Collins Monday, August 10 - 9:00am",
+             "Craig Collins Landscape Lighting\nMonday, August 10 - 9:00 - 9:30am\n"
+             "Time zone: America/New_York\nGoogle Meet joining info\n"
+             "Video call link: https://meet.google.com/jtx-auam-sun")
+    assert is_machine_generated(m) is True
+
+
+def test_link_only_body_is_machine_generated():
+    m = _msg("me@example.com", "Post by someone on X",
+             "https://x.com/someone/status/2088687925286342712?s=51")
+    assert is_machine_generated(m) is True
+
+
+def test_real_prose_is_not_machine_generated():
+    m = _msg("shane@acme.com", "meeting today?",
+             "Good morning Shane,\nAre we meeting today in 10mins?\n-Ken")
+    assert is_machine_generated(m) is False
+
+
+def test_prose_containing_a_link_is_not_machine_generated():
+    m = _msg("shane@acme.com", "tool is live",
+             "The review screen got an upgrade today and it's live.\n"
+             "https://example.com/dashboard\nLog in with HubSpot, same as before.")
+    assert is_machine_generated(m) is False
+
+
+def test_cli_reports_what_it_dropped(tmp_path):
+    """No silent filtering — the user must see what was removed and why."""
+    root = Path(__file__).parent.parent
+    raw = [
+        {"id": "1", "from": "Ken <me@example.com>", "to": "me@example.com",
+         "subject": "[Daily] review", "date": "Thu, 6 Aug 2026 09:50:06 -0400",
+         "body": "HEADLINE: orders are up. Tally is three purchases this week."},
+        {"id": "2", "from": "Ken <me@example.com>", "to": "shane@acme.com",
+         "subject": "meeting today?", "date": "Thu, 6 Aug 2026 09:51:06 -0400",
+         "body": "Good morning Shane, are we still meeting today in ten minutes "
+                 "or should we push it to tomorrow afternoon instead?"},
+    ]
+    src = tmp_path / "raw.json"
+    src.write_text(json.dumps(raw), encoding="utf-8")
+    out = tmp_path / "corpus.json"
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "ingest.py"), "--json", str(src),
+         "--user", "me@example.com", "--out", str(out)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["stats"]["self_addressed"] == 1
+    assert data["stats"]["kept"] == 1
+    assert "self-addressed" in result.stdout
