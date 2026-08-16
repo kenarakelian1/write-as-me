@@ -178,8 +178,10 @@ words versus imperative-mood sentence rate; question rate; bullet-list usage rat
 length. Whether someone leads with the ask or buries it is among the most recognizable
 things about how they write.
 
-**Lexicon** — distinctive 1–3-grams ranked by log-odds against a bundled
-common-English frequency baseline. These are the pet phrases.
+**Lexicon** — distinctive 1–3-grams ranked by log-odds against a common-English
+frequency baseline. These are the pet phrases. The baseline ships in the repo as
+`fixtures/baseline_ngrams.json`: a public-domain unigram and bigram frequency list of
+roughly 20k entries, small enough to commit and to keep the plugin dependency-free.
 
 ## Stage 4 — Register clustering
 
