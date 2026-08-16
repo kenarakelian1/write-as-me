@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Never commit real mail
+emails/
+*.mbox
+*.eml
+!fixtures/synthetic/*.eml
+.wam/
+corpus.json
+raw.json
+
+# Orchestration scratch
+.superpowers/

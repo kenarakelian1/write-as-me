@@ -1,0 +1,15 @@
+From: Dana Reyes <dana@northwind-labs.com>
+To: Omar Haddad <omar@northwind-labs.com>
+Subject: Postmortem notes
+Date: Mon, 12 May 2025 08:39:15 -0400
+Message-ID: <internal-011@northwind-labs.com>
+Content-Type: text/plain; charset="utf-8"
+
+Can you write up the postmortem from Tuesday's outage? Keep it to root
+cause, timeline, and the two follow-up items — no need for the full
+narrative, leadership just wants the shape of what happened.
+
+Want it before Friday's leadership sync if possible — I'll present it
+myself if you'd rather not.
+
+— Dana
