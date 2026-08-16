@@ -1,0 +1,2213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>write-as-me Implementation Plan</title>
+<style>
+:root {
+  --ink: #1a1a1a; --muted: #5c5c5c; --rule: #e0ddd6;
+  --bg: #fdfcfa; --accent: #7a3e2f; --code-bg: #f4f2ed;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #e8e6e1; --muted: #a8a49c; --rule: #35322c;
+    --bg: #16151300; --bg: #161513; --accent: #d99a7f; --code-bg: #211f1c;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 4rem 1.5rem 8rem;
+  background: var(--bg); color: var(--ink);
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-size: 18px; line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+main { max-width: 44rem; margin: 0 auto; }
+h1, h2, h3, h4 {
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  line-height: 1.25; font-weight: 600; margin: 2.5em 0 0.6em;
+}
+h1 { font-size: 2.1rem; margin-top: 0; letter-spacing: -0.02em; }
+h2 { font-size: 1.4rem; padding-bottom: 0.3em; border-bottom: 1px solid var(--rule); }
+h3 { font-size: 1.12rem; }
+h4 { font-size: 1rem; color: var(--muted); }
+p, ul, ol { margin: 0 0 1.15em; }
+li { margin-bottom: 0.35em; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+hr { border: 0; border-top: 1px solid var(--rule); margin: 3em 0; }
+blockquote {
+  margin: 0 0 1.15em; padding-left: 1.2em;
+  border-left: 3px solid var(--rule); color: var(--muted);
+}
+code {
+  font-family: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  font-size: 0.85em; background: var(--code-bg);
+  padding: 0.15em 0.4em; border-radius: 3px;
+}
+pre {
+  background: var(--code-bg); padding: 1.1em 1.3em; border-radius: 6px;
+  overflow-x: auto; font-size: 0.85rem; line-height: 1.5;
+  border: 1px solid var(--rule);
+}
+pre code { background: none; padding: 0; font-size: 1em; }
+table {
+  width: 100%; border-collapse: collapse; margin: 0 0 1.5em;
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif; font-size: 0.9rem;
+}
+th, td { text-align: left; padding: 0.55em 0.8em; border-bottom: 1px solid var(--rule); }
+th { font-weight: 600; border-bottom-width: 2px; }
+.mermaid { margin: 2em 0; text-align: center; }
+@media print {
+  body { background: #fff; color: #000; font-size: 11pt; padding: 0; }
+  h2 { page-break-after: avoid; }
+  pre, table, blockquote { page-break-inside: avoid; }
+  a { color: #000; text-decoration: none; }
+}
+</style>
+</head>
+<body>
+<main>
+<h1>write-as-me Implementation Plan</h1>
+<blockquote>
+<p><strong>For agentic workers:</strong> REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (<code>- [ ]</code>) syntax for tracking.</p>
+</blockquote>
+<p><strong>Goal:</strong> Build a Claude Code plugin that derives a personalized email writing-style guide from a user's sent mail and drafts new email in that voice.</p>
+<p><strong>Architecture:</strong> Deterministic Python (stdlib only) handles parsing, cleaning, metric computation, register clustering, and redaction, emitting a compact JSON fingerprint plus redacted exemplars. The model reads that small artifact — never the bulk corpus — and synthesizes a directive style guide written to <code>~/.claude/wam/</code>. Tasks 1–5 build and test the pipeline standalone; Tasks 6–8 wire it into the skill and plugin.</p>
+<p><strong>Tech Stack:</strong> Python 3.9+ (stdlib: <code>email</code>, <code>mailbox</code>, <code>json</code>, <code>re</code>, <code>statistics</code>, <code>argparse</code>), pytest for dev-time tests, Claude Code plugin manifests, Markdown skill definitions.</p>
+<h2>Global Constraints</h2>
+<ul>
+<li><strong>Runtime dependencies: none.</strong> Python standard library only. pytest is dev-only, declared in <code>requirements-dev.txt</code>, never imported by <code>scripts/</code>.</li>
+<li><strong>Python floor: 3.9.</strong> Every module starts with <code>from __future__ import annotations</code> so modern type syntax works on 3.9.</li>
+<li><strong>Explicit UTF-8 everywhere.</strong> Every <code>open()</code>, <code>read_text()</code>, and <code>write_text()</code> passes <code>encoding=&quot;utf-8&quot;</code>. Windows defaults to cp1252 and will corrupt real email without this.</li>
+<li><strong>No network calls</strong> in any script under <code>scripts/</code>.</li>
+<li><strong>Generated profiles write to <code>~/.claude/wam/</code></strong>, never inside the repo.</li>
+<li><strong>Repo name / plugin name / skill name:</strong> <code>write-as-me</code>. Storage directory and alias command: <code>wam</code>.</li>
+<li><strong>Every script is CLI-invokable</strong> as <code>python scripts/&lt;name&gt;.py --help</code> and communicates via JSON files.</li>
+<li>Corpus minimum: <strong>12</strong> usable messages. Register minimum: <strong>8</strong> messages. Gmail window: <strong>12 months</strong>. Dedupe threshold: <strong>0.85</strong> Jaccard.</li>
+<li>Commit after every task. Never commit anything under <code>emails/</code>, <code>*.mbox</code>, <code>*.eml</code>.</li>
+</ul>
+<hr />
+<h2>File Structure</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Responsibility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>scripts/ingest.py</code></td>
+<td>Sources → cleaned, normalized <code>corpus.json</code></td>
+</tr>
+<tr>
+<td><code>scripts/fingerprint.py</code></td>
+<td><code>corpus.json</code> → <code>fingerprint.json</code> + <code>exemplars.json</code></td>
+</tr>
+<tr>
+<td><code>scripts/redact.py</code></td>
+<td>PII scrub, importable and CLI</td>
+</tr>
+<tr>
+<td><code>scripts/eval_holdout.py</code></td>
+<td>Holdout harness comparing draft vs. original fingerprints</td>
+</tr>
+<tr>
+<td><code>scripts/build_baseline.py</code></td>
+<td>One-time generator for <code>fixtures/baseline_ngrams.json</code></td>
+</tr>
+<tr>
+<td><code>skills/write-as-me/SKILL.md</code></td>
+<td>Both modes; the only file Claude reads at invocation</td>
+</tr>
+<tr>
+<td><code>commands/wam.md</code></td>
+<td>Alias delegating to the skill</td>
+</tr>
+<tr>
+<td><code>.claude-plugin/plugin.json</code>, <code>marketplace.json</code></td>
+<td>Plugin metadata</td>
+</tr>
+<tr>
+<td><code>fixtures/synthetic/</code></td>
+<td>Fake persona corpus, ~40 <code>.eml</code> files</td>
+</tr>
+<tr>
+<td><code>fixtures/baseline_ngrams.json</code></td>
+<td>Common-English frequency baseline</td>
+</tr>
+<tr>
+<td><code>tests/</code></td>
+<td>pytest suites, one per script</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Task 1: Repo scaffolding, fixtures, and baseline</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>.gitignore</code>, <code>requirements-dev.txt</code>, <code>pytest.ini</code>, <code>README.md</code></li>
+<li>Create: <code>scripts/build_baseline.py</code></li>
+<li>Create: <code>fixtures/baseline_ngrams.json</code></li>
+<li>Create: <code>fixtures/synthetic/*.eml</code> (40 files)</li>
+<li>Create: <code>fixtures/synthetic/README.md</code></li>
+<li>Test: <code>tests/test_fixtures.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>
+<p>Consumes: nothing.</p>
+</li>
+<li>
+<p>Produces: <code>fixtures/synthetic/</code> (40 <code>.eml</code> files from persona &quot;Dana Reyes&quot; <code>&lt;dana@northwind-labs.com&gt;</code>), and <code>fixtures/baseline_ngrams.json</code> with shape <code>{&quot;unigrams&quot;: {&quot;the&quot;: 0.0512, ...}, &quot;bigrams&quot;: {&quot;of the&quot;: 0.0021, ...}}</code> where values are relative frequencies summing to ~1.0 per section.</p>
+</li>
+<li>
+<p>[ ] <strong>Step 1: Create <code>.gitignore</code></strong></p>
+</li>
+</ul>
+<pre><code class="language-gitignore">__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Never commit real mail
+emails/
+*.mbox
+*.eml
+!fixtures/synthetic/*.eml
+.wam/
+corpus.json
+raw.json
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: Create <code>requirements-dev.txt</code> and <code>pytest.ini</code></strong></li>
+</ul>
+<pre><code># requirements-dev.txt
+pytest&gt;=7.0
+</code></pre>
+<pre><code class="language-ini"># pytest.ini
+[pytest]
+testpaths = tests
+python_files = test_*.py
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 3: Write the synthetic persona corpus</strong></li>
+</ul>
+<p>Create 40 <code>.eml</code> files in <code>fixtures/synthetic/</code>. Persona: <strong>Dana Reyes</strong>, <code>dana@northwind-labs.com</code>, a consultant with a deliberately distinctive voice so metrics have signal to find.</p>
+<p>Dana's designed traits (the tests assert these, so they must be real in the data):</p>
+<ul>
+<li>Short: most emails 40–80 words</li>
+<li>Opens <code>Hi &lt;name&gt;</code> to clients, no greeting on internal replies</li>
+<li>Signs off <code>— Dana</code> internally, <code>Best, Dana Reyes</code> to clients</li>
+<li>Heavy em dash, zero exclamation marks to clients</li>
+<li>Leads with the ask</li>
+<li>Pet phrase: &quot;worth a look&quot; appears in ~8 emails</li>
+</ul>
+<p>Distribution: 14 client (<code>@*.com</code> external), 12 internal (<code>@northwind-labs.com</code>), 6 cold outreach, 5 personal (<code>@gmail.com</code>), 3 terse acks (under 15 words).</p>
+<p>At least 6 must contain quoted reply blocks (mix of Gmail <code>On ... wrote:</code>, Outlook <code>-----Original Message-----</code>, and <code>&gt;</code> prefixes), 8 must carry signatures, 2 must be auto-replies, and 2 must be near-duplicate templated outreach so dedupe has something to catch.</p>
+<p>Example file, <code>fixtures/synthetic/client_001.eml</code>:</p>
+<pre><code>From: Dana Reyes &lt;dana@northwind-labs.com&gt;
+To: Priya Raman &lt;priya@harborline.com&gt;
+Subject: Timeline for the Q3 rollout
+Date: Mon, 14 Apr 2025 09:12:04 -0400
+Message-ID: &lt;client-001@northwind-labs.com&gt;
+Content-Type: text/plain; charset=&quot;utf-8&quot;
+
+Hi Priya,
+
+Can you confirm the Q3 date by Thursday? We need it locked before the vendor
+contract goes out — otherwise we're rebuilding the schedule twice.
+
+One thing worth a look: the staging environment is still on the old config.
+
+Best,
+Dana Reyes
+
+--
+Dana Reyes | Northwind Labs
++1 555 018 2299 | northwind-labs.com
+</code></pre>
+<p>Example with a quoted block, <code>fixtures/synthetic/internal_004.eml</code>:</p>
+<pre><code>From: Dana Reyes &lt;dana@northwind-labs.com&gt;
+To: Marcus Webb &lt;marcus@northwind-labs.com&gt;
+Subject: Re: staging config
+Date: Tue, 15 Apr 2025 16:40:11 -0400
+Message-ID: &lt;internal-004@northwind-labs.com&gt;
+Content-Type: text/plain; charset=&quot;utf-8&quot;
+
+Pushed the fix — should be live in ten minutes.
+
+— Dana
+
+On Tue, Apr 15, 2025 at 4:02 PM Marcus Webb &lt;marcus@northwind-labs.com&gt; wrote:
+&gt; Did the staging config ever get updated? I'm still seeing the old
+&gt; values in the dashboard.
+&gt;
+&gt; Marcus
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: Write <code>fixtures/synthetic/README.md</code></strong></li>
+</ul>
+<p>State that the corpus is entirely fictional, that no real person's mail is in the repo, and list the designed traits above so contributors know what the tests depend on.</p>
+<ul>
+<li>[ ] <strong>Step 5: Write <code>scripts/build_baseline.py</code></strong></li>
+</ul>
+<pre><code class="language-python">from __future__ import annotations
+
+import argparse
+import json
+import re
+from collections import Counter
+from pathlib import Path
+
+TOKEN = re.compile(r&quot;[a-z']+&quot;)
+
+
+def tokenize(text: str) -&gt; list[str]:
+    return TOKEN.findall(text.lower())
+
+
+def build(corpus_text: str, top_n: int = 20000) -&gt; dict:
+    words = tokenize(corpus_text)
+    uni = Counter(words)
+    bi = Counter(f&quot;{a} {b}&quot; for a, b in zip(words, words[1:]))
+    uni_total = sum(uni.values()) or 1
+    bi_total = sum(bi.values()) or 1
+    return {
+        &quot;unigrams&quot;: {w: c / uni_total for w, c in uni.most_common(top_n)},
+        &quot;bigrams&quot;: {g: c / bi_total for g, c in bi.most_common(top_n)},
+    }
+
+
+def main() -&gt; int:
+    ap = argparse.ArgumentParser(description=&quot;Build an n-gram frequency baseline.&quot;)
+    ap.add_argument(&quot;--source&quot;, required=True, help=&quot;Plain-text public-domain corpus&quot;)
+    ap.add_argument(&quot;--out&quot;, required=True)
+    ap.add_argument(&quot;--top-n&quot;, type=int, default=20000)
+    args = ap.parse_args()
+
+    text = Path(args.source).read_text(encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;)
+    Path(args.out).write_text(
+        json.dumps(build(text, args.top_n), indent=0), encoding=&quot;utf-8&quot;
+    )
+    print(f&quot;wrote {args.out}&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    raise SystemExit(main())
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 6: Generate the baseline</strong></li>
+</ul>
+<p>Source text must be public domain. Use a concatenation of Project Gutenberg plain-text works (any several novels totalling &gt;1M words) downloaded manually to a scratch path — the script itself makes no network calls.</p>
+<p>Run: <code>python scripts/build_baseline.py --source &lt;scratch&gt;/pd_corpus.txt --out fixtures/baseline_ngrams.json</code></p>
+<p>Verify the file is under 3 MB. If larger, lower <code>--top-n</code> to 10000 and regenerate.</p>
+<ul>
+<li>[ ] <strong>Step 7: Write the fixture integrity test</strong></li>
+</ul>
+<pre><code class="language-python"># tests/test_fixtures.py
+from __future__ import annotations
+
+import json
+from email import policy
+from email.parser import BytesParser
+from pathlib import Path
+
+FIXTURES = Path(__file__).parent.parent / &quot;fixtures&quot;
+SYNTHETIC = FIXTURES / &quot;synthetic&quot;
+
+
+def load_all():
+    parser = BytesParser(policy=policy.default)
+    return [parser.parsebytes(p.read_bytes()) for p in sorted(SYNTHETIC.glob(&quot;*.eml&quot;))]
+
+
+def test_corpus_size():
+    assert len(list(SYNTHETIC.glob(&quot;*.eml&quot;))) == 40
+
+
+def test_every_message_is_from_dana():
+    for msg in load_all():
+        assert &quot;dana@northwind-labs.com&quot; in msg[&quot;From&quot;]
+
+
+def test_every_message_parses_with_a_body():
+    for msg in load_all():
+        assert msg.get_body(preferencelist=(&quot;plain&quot;,)) is not None
+
+
+def test_baseline_shape():
+    data = json.loads((FIXTURES / &quot;baseline_ngrams.json&quot;).read_text(encoding=&quot;utf-8&quot;))
+    assert set(data) == {&quot;unigrams&quot;, &quot;bigrams&quot;}
+    assert len(data[&quot;unigrams&quot;]) &gt;= 5000
+    assert data[&quot;unigrams&quot;][&quot;the&quot;] &gt; data[&quot;unigrams&quot;].get(&quot;nevertheless&quot;, 0)
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 8: Run the tests</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_fixtures.py -v</code>
+Expected: 4 passed. If <code>test_corpus_size</code> fails, you wrote the wrong number of <code>.eml</code> files.</p>
+<ul>
+<li>[ ] <strong>Step 9: Commit</strong></li>
+</ul>
+<pre><code class="language-bash">git add .gitignore requirements-dev.txt pytest.ini scripts/build_baseline.py fixtures tests/test_fixtures.py
+git commit -m &quot;feat: repo scaffolding, synthetic fixture corpus, ngram baseline&quot;
+</code></pre>
+<hr />
+<h2>Task 2: <code>ingest.py</code> — parsing and cleaning</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>scripts/ingest.py</code></li>
+<li>Test: <code>tests/test_ingest.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>
+<p>Consumes: <code>fixtures/synthetic/*.eml</code> from Task 1.</p>
+</li>
+<li>
+<p>Produces, importable by later tasks:</p>
+<ul>
+<li><code>strip_quoted(body: str) -&gt; str</code></li>
+<li><code>strip_signature(body: str) -&gt; str</code></li>
+<li><code>is_auto_reply(msg: EmailMessage) -&gt; bool</code></li>
+<li><code>extract_body(msg: EmailMessage) -&gt; str</code></li>
+<li><code>normalize(msg: EmailMessage, user_email: str) -&gt; dict | None</code></li>
+<li><code>dedupe(messages: list[dict], threshold: float = 0.85) -&gt; list[dict]</code></li>
+<li>Message dict schema: <code>{&quot;id&quot;: str, &quot;date&quot;: str, &quot;to_domains&quot;: list[str], &quot;recipient_count&quot;: int, &quot;subject&quot;: str, &quot;body&quot;: str, &quot;is_reply&quot;: bool, &quot;word_count&quot;: int}</code></li>
+<li>CLI: <code>python scripts/ingest.py --eml-dir DIR --user EMAIL --out corpus.json</code>, also accepting <code>--mbox FILE</code> or <code>--json FILE</code>.</li>
+</ul>
+</li>
+<li>
+<p>[ ] <strong>Step 1: Write failing tests for quote stripping</strong></p>
+</li>
+</ul>
+<pre><code class="language-python"># tests/test_ingest.py
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / &quot;scripts&quot;))
+
+from ingest import (  # noqa: E402
+    dedupe,
+    normalize,
+    strip_quoted,
+    strip_signature,
+)
+
+
+def test_strips_gmail_quote():
+    body = (
+        &quot;Pushed the fix.\n\n&quot;
+        &quot;On Tue, Apr 15, 2025 at 4:02 PM Marcus Webb &lt;m@x.com&gt; wrote:\n&quot;
+        &quot;&gt; Did the config get updated?\n&quot;
+    )
+    assert strip_quoted(body).strip() == &quot;Pushed the fix.&quot;
+
+
+def test_strips_outlook_quote():
+    body = &quot;Sounds good.\n\n-----Original Message-----\nFrom: Bob\nOld text\n&quot;
+    assert strip_quoted(body).strip() == &quot;Sounds good.&quot;
+
+
+def test_strips_bare_angle_quotes():
+    body = &quot;No thanks.\n\n&gt; please reconsider\n&gt; it is important\n&quot;
+    assert strip_quoted(body).strip() == &quot;No thanks.&quot;
+
+
+def test_strips_outlook_divider():
+    body = &quot;Done.\n\n________________________________\nFrom: Someone\n&quot;
+    assert strip_quoted(body).strip() == &quot;Done.&quot;
+
+
+def test_keeps_body_without_quotes():
+    body = &quot;Just a plain note with &gt; a greater than sign inline.&quot;
+    assert strip_quoted(body).strip() == body
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: Run to verify failure</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_ingest.py -v</code>
+Expected: FAIL — <code>ModuleNotFoundError: No module named 'ingest'</code></p>
+<ul>
+<li>[ ] <strong>Step 3: Implement quote stripping</strong></li>
+</ul>
+<pre><code class="language-python"># scripts/ingest.py
+from __future__ import annotations
+
+import argparse
+import json
+import mailbox
+import re
+from email import policy
+from email.message import EmailMessage
+from email.parser import BytesParser
+from email.utils import getaddresses, parsedate_to_datetime
+from pathlib import Path
+
+QUOTE_MARKERS = [
+    re.compile(r&quot;^On .{0,200}\bwrote:\s*$&quot;, re.MULTILINE),
+    re.compile(r&quot;^-{2,}\s*Original Message\s*-{2,}\s*$&quot;, re.MULTILINE | re.IGNORECASE),
+    re.compile(r&quot;^_{10,}\s*$&quot;, re.MULTILINE),
+    re.compile(r&quot;^From:\s.+\nSent:\s.+$&quot;, re.MULTILINE),
+    re.compile(r&quot;^\s*&gt;&quot;, re.MULTILINE),
+]
+
+
+def strip_quoted(body: str) -&gt; str:
+    &quot;&quot;&quot;Truncate at the earliest quoted-reply marker.&quot;&quot;&quot;
+    cut = len(body)
+    for pattern in QUOTE_MARKERS:
+        match = pattern.search(body)
+        if match:
+            cut = min(cut, match.start())
+    return body[:cut].rstrip()
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: Run to verify quote tests pass</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_ingest.py -v -k &quot;quote or divider or plain&quot;</code>
+Expected: 5 passed. (Quote the <code>-k</code> expression — PowerShell splits it otherwise.)</p>
+<ul>
+<li>[ ] <strong>Step 5: Write failing tests for signature stripping</strong></li>
+</ul>
+<pre><code class="language-python">def test_strips_dash_dash_signature():
+    body = &quot;Thanks for the update.\n\n-- \nDana Reyes\nNorthwind Labs\n+1 555 018 2299&quot;
+    assert strip_signature(body).strip() == &quot;Thanks for the update.&quot;
+
+
+def test_strips_mobile_footer():
+    body = &quot;On my way.\n\nSent from my iPhone&quot;
+    assert strip_signature(body).strip() == &quot;On my way.&quot;
+
+
+def test_strips_trailing_contact_block():
+    body = &quot;Let's lock the date.\n\nDana Reyes\nNorthwind Labs\nnorthwind-labs.com&quot;
+    assert strip_signature(body).strip() == &quot;Let's lock the date.&quot;
+
+
+def test_keeps_signoff_line():
+    &quot;&quot;&quot;A signoff is style, not a signature block — it must survive.&quot;&quot;&quot;
+    body = &quot;Pushed the fix.\n\n— Dana&quot;
+    assert &quot;Dana&quot; in strip_signature(body)
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 6: Run to verify failure</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_ingest.py -v -k &quot;signature or footer or contact or signoff&quot;</code>
+Expected: FAIL — <code>ImportError: cannot import name 'strip_signature'</code></p>
+<ul>
+<li>[ ] <strong>Step 7: Implement signature stripping</strong></li>
+</ul>
+<pre><code class="language-python">SIG_DELIMITER = re.compile(r&quot;^--\s?$&quot;, re.MULTILINE)
+MOBILE_FOOTER = re.compile(
+    r&quot;^\s*(Sent from my \w+|Get Outlook for \w+|Sent via \w+).*$&quot;,
+    re.MULTILINE | re.IGNORECASE,
+)
+CONTACT_LINE = re.compile(
+    r&quot;(\+?\d[\d\s().-]{7,}\d&quot;          # phone
+    r&quot;|\b[\w.+-]+@[\w-]+\.\w+\b&quot;       # email
+    r&quot;|\b[\w-]+\.(com|net|org|io|co)\b&quot;  # bare domain
+    r&quot;|\|)&quot;,                            # pipe-separated title bars
+    re.IGNORECASE,
+)
+
+
+def strip_signature(body: str) -&gt; str:
+    &quot;&quot;&quot;Remove signature blocks while preserving a bare signoff line.&quot;&quot;&quot;
+    match = SIG_DELIMITER.search(body)
+    if match:
+        body = body[: match.start()]
+
+    match = MOBILE_FOOTER.search(body)
+    if match:
+        body = body[: match.start()]
+
+    # Trailing contact block: walk up from the end while lines look like contact
+    # details. Stop at the first line that reads like prose or a signoff.
+    lines = body.rstrip().split(&quot;\n&quot;)
+    while len(lines) &gt; 1 and lines[-1].strip():
+        last = lines[-1].strip()
+        is_contact = bool(CONTACT_LINE.search(last)) and len(last.split()) &lt;= 8
+        if not is_contact:
+            break
+        lines.pop()
+    return &quot;\n&quot;.join(lines).rstrip()
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 8: Run to verify signature tests pass</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_ingest.py -v</code>
+Expected: 9 passed.</p>
+<ul>
+<li>[ ] <strong>Step 9: Write failing tests for normalization and dedupe</strong></li>
+</ul>
+<pre><code class="language-python">FIXTURES = Path(__file__).parent.parent / &quot;fixtures&quot; / &quot;synthetic&quot;
+USER = &quot;dana@northwind-labs.com&quot;
+
+
+def load_eml(name: str):
+    return BytesParser(policy=policy.default).parsebytes((FIXTURES / name).read_bytes())
+
+
+def test_normalize_produces_schema():
+    msg = load_eml(&quot;client_001.eml&quot;)
+    rec = normalize(msg, USER)
+    assert set(rec) == {
+        &quot;id&quot;, &quot;date&quot;, &quot;to_domains&quot;, &quot;recipient_count&quot;,
+        &quot;subject&quot;, &quot;body&quot;, &quot;is_reply&quot;, &quot;word_count&quot;,
+    }
+    assert rec[&quot;to_domains&quot;] == [&quot;harborline.com&quot;]
+    assert rec[&quot;is_reply&quot;] is False
+    assert rec[&quot;word_count&quot;] &gt; 0
+
+
+def test_normalize_detects_reply():
+    assert normalize(load_eml(&quot;internal_004.eml&quot;), USER)[&quot;is_reply&quot;] is True
+
+
+def test_normalize_rejects_mail_from_others():
+    msg = load_eml(&quot;client_001.eml&quot;)
+    assert normalize(msg, &quot;someone-else@example.com&quot;) is None
+
+
+def test_dedupe_removes_near_duplicates():
+    a = {&quot;id&quot;: &quot;a&quot;, &quot;body&quot;: &quot;We help teams ship faster with fewer meetings and less overhead.&quot;}
+    b = {&quot;id&quot;: &quot;b&quot;, &quot;body&quot;: &quot;We help teams ship faster with fewer meetings and less overhead now.&quot;}
+    c = {&quot;id&quot;: &quot;c&quot;, &quot;body&quot;: &quot;Completely unrelated message about lunch plans on Friday.&quot;}
+    kept = dedupe([a, b, c])
+    assert [m[&quot;id&quot;] for m in kept] == [&quot;a&quot;, &quot;c&quot;]
+</code></pre>
+<p>Add the <code>BytesParser</code>/<code>policy</code> imports to the test file's import block.</p>
+<ul>
+<li>[ ] <strong>Step 10: Run to verify failure</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_ingest.py -v -k &quot;normalize or dedupe&quot;</code>
+Expected: FAIL — <code>ImportError: cannot import name 'normalize'</code></p>
+<ul>
+<li>[ ] <strong>Step 11: Implement body extraction, normalization, and dedupe</strong></li>
+</ul>
+<pre><code class="language-python">AUTO_HEADERS = (&quot;auto-submitted&quot;, &quot;x-autoreply&quot;, &quot;x-autorespond&quot;)
+TAG_RE = re.compile(r&quot;&lt;[^&gt;]+&gt;&quot;)
+
+
+def is_auto_reply(msg: EmailMessage) -&gt; bool:
+    for header in AUTO_HEADERS:
+        value = msg.get(header)
+        if value and value.lower() not in (&quot;no&quot;,):
+            return True
+    subject = (msg.get(&quot;Subject&quot;) or &quot;&quot;).lower()
+    return subject.startswith((&quot;out of office&quot;, &quot;automatic reply&quot;))
+
+
+def extract_body(msg: EmailMessage) -&gt; str:
+    part = msg.get_body(preferencelist=(&quot;plain&quot;,))
+    if part is not None:
+        return part.get_content()
+    part = msg.get_body(preferencelist=(&quot;html&quot;,))
+    if part is not None:
+        return TAG_RE.sub(&quot; &quot;, part.get_content())
+    return &quot;&quot;
+
+
+def _domains(msg: EmailMessage) -&gt; list[str]:
+    pairs = getaddresses(
+        [msg.get(&quot;To&quot;, &quot;&quot;), msg.get(&quot;Cc&quot;, &quot;&quot;)]
+    )
+    seen = []
+    for _, addr in pairs:
+        if &quot;@&quot; in addr:
+            domain = addr.split(&quot;@&quot;, 1)[1].lower()
+            if domain not in seen:
+                seen.append(domain)
+    return seen
+
+
+def normalize(msg: EmailMessage, user_email: str) -&gt; dict | None:
+    sender = (msg.get(&quot;From&quot;) or &quot;&quot;).lower()
+    if user_email.lower() not in sender:
+        return None
+    if is_auto_reply(msg):
+        return None
+    if (msg.get_content_type() or &quot;&quot;).startswith(&quot;text/calendar&quot;):
+        return None
+
+    body = strip_signature(strip_quoted(extract_body(msg))).strip()
+    if not body:
+        return None
+
+    try:
+        date = parsedate_to_datetime(msg.get(&quot;Date&quot;, &quot;&quot;)).isoformat()
+    except (TypeError, ValueError):
+        date = &quot;&quot;
+
+    subject = msg.get(&quot;Subject&quot;, &quot;&quot;) or &quot;&quot;
+    recipients = getaddresses([msg.get(&quot;To&quot;, &quot;&quot;), msg.get(&quot;Cc&quot;, &quot;&quot;)])
+    return {
+        &quot;id&quot;: msg.get(&quot;Message-ID&quot;, &quot;&quot;) or subject[:40],
+        &quot;date&quot;: date,
+        &quot;to_domains&quot;: _domains(msg),
+        &quot;recipient_count&quot;: len(recipients),
+        &quot;subject&quot;: subject,
+        &quot;body&quot;: body,
+        &quot;is_reply&quot;: subject.lower().startswith(&quot;re:&quot;),
+        &quot;word_count&quot;: len(body.split()),
+    }
+
+
+def _shingles(text: str, size: int = 5) -&gt; set[str]:
+    words = re.findall(r&quot;[a-z']+&quot;, text.lower())
+    if len(words) &lt; size:
+        return {&quot; &quot;.join(words)}
+    return {&quot; &quot;.join(words[i : i + size]) for i in range(len(words) - size + 1)}
+
+
+def dedupe(messages: list[dict], threshold: float = 0.85) -&gt; list[dict]:
+    kept: list[tuple[dict, set[str]]] = []
+    for msg in messages:
+        shingles = _shingles(msg[&quot;body&quot;])
+        duplicate = False
+        for _, existing in kept:
+            union = shingles | existing
+            if union and len(shingles &amp; existing) / len(union) &gt;= threshold:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append((msg, shingles))
+    return [msg for msg, _ in kept]
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 12: Run to verify all ingest tests pass</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_ingest.py -v</code>
+Expected: 13 passed.</p>
+<ul>
+<li>[ ] <strong>Step 13: Add loaders and the CLI</strong></li>
+</ul>
+<pre><code class="language-python">TERSE_WORD_LIMIT = 15
+
+
+def load_eml_dir(path: Path) -&gt; list[EmailMessage]:
+    parser = BytesParser(policy=policy.default)
+    return [parser.parsebytes(p.read_bytes()) for p in sorted(path.glob(&quot;*.eml&quot;))]
+
+
+def load_mbox(path: Path) -&gt; list[EmailMessage]:
+    box = mailbox.mbox(str(path), factory=None)
+    out = []
+    for key in box.iterkeys():
+        try:
+            raw = box.get_bytes(key)
+        except Exception:
+            continue
+        try:
+            out.append(BytesParser(policy=policy.default).parsebytes(raw))
+        except Exception:
+            continue
+    return out
+
+
+def load_json(path: Path) -&gt; list[EmailMessage]:
+    &quot;&quot;&quot;Load a Gmail-connector dump: [{from, to, cc, subject, date, body}, ...].&quot;&quot;&quot;
+    records = json.loads(path.read_text(encoding=&quot;utf-8&quot;))
+    out = []
+    for rec in records:
+        msg = EmailMessage()
+        msg[&quot;From&quot;] = rec.get(&quot;from&quot;, &quot;&quot;)
+        msg[&quot;To&quot;] = rec.get(&quot;to&quot;, &quot;&quot;)
+        if rec.get(&quot;cc&quot;):
+            msg[&quot;Cc&quot;] = rec[&quot;cc&quot;]
+        msg[&quot;Subject&quot;] = rec.get(&quot;subject&quot;, &quot;&quot;)
+        msg[&quot;Date&quot;] = rec.get(&quot;date&quot;, &quot;&quot;)
+        msg[&quot;Message-ID&quot;] = rec.get(&quot;id&quot;, &quot;&quot;)
+        msg.set_content(rec.get(&quot;body&quot;, &quot;&quot;))
+        out.append(msg)
+    return out
+
+
+def main() -&gt; int:
+    ap = argparse.ArgumentParser(description=&quot;Normalize sent mail into corpus.json&quot;)
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument(&quot;--eml-dir&quot;)
+    src.add_argument(&quot;--mbox&quot;)
+    src.add_argument(&quot;--json&quot;)
+    ap.add_argument(&quot;--user&quot;, required=True, help=&quot;The user's own email address&quot;)
+    ap.add_argument(&quot;--out&quot;, required=True)
+    args = ap.parse_args()
+
+    if args.eml_dir:
+        raw = load_eml_dir(Path(args.eml_dir))
+    elif args.mbox:
+        raw = load_mbox(Path(args.mbox))
+    else:
+        raw = load_json(Path(args.json))
+
+    records = [r for r in (normalize(m, args.user) for m in raw) if r]
+    records = dedupe(records)
+
+    main_corpus = [r for r in records if r[&quot;word_count&quot;] &gt;= TERSE_WORD_LIMIT]
+    terse = [r for r in records if r[&quot;word_count&quot;] &lt; TERSE_WORD_LIMIT]
+
+    payload = {
+        &quot;user&quot;: args.user,
+        &quot;messages&quot;: main_corpus,
+        &quot;terse_ack&quot;: terse,
+        &quot;stats&quot;: {
+            &quot;raw&quot;: len(raw),
+            &quot;deduped&quot;: len(records),
+            &quot;kept&quot;: len(main_corpus),
+            &quot;terse&quot;: len(terse),
+        },
+    }
+    Path(args.out).write_text(json.dumps(payload, indent=2), encoding=&quot;utf-8&quot;)
+    print(
+        f&quot;{len(raw)} parsed -&gt; {len(main_corpus)} usable, &quot;
+        f&quot;{len(terse)} terse acks -&gt; {args.out}&quot;
+    )
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    raise SystemExit(main())
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 14: Write the end-to-end CLI test</strong></li>
+</ul>
+<pre><code class="language-python">import subprocess
+
+
+def test_cli_end_to_end(tmp_path):
+    out = tmp_path / &quot;corpus.json&quot;
+    root = Path(__file__).parent.parent
+    result = subprocess.run(
+        [sys.executable, str(root / &quot;scripts&quot; / &quot;ingest.py&quot;),
+         &quot;--eml-dir&quot;, str(FIXTURES), &quot;--user&quot;, USER, &quot;--out&quot;, str(out)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(out.read_text(encoding=&quot;utf-8&quot;))
+    assert data[&quot;stats&quot;][&quot;kept&quot;] &gt;= 12
+    assert data[&quot;stats&quot;][&quot;terse&quot;] == 3
+    # Auto-replies dropped, near-duplicates collapsed
+    assert data[&quot;stats&quot;][&quot;kept&quot;] + data[&quot;stats&quot;][&quot;terse&quot;] &lt; 40
+    for msg in data[&quot;messages&quot;]:
+        assert &quot;wrote:&quot; not in msg[&quot;body&quot;]
+        assert &quot;Sent from my&quot; not in msg[&quot;body&quot;]
+</code></pre>
+<p>Add <code>import json</code> and <code>import subprocess</code> to the test imports.</p>
+<ul>
+<li>[ ] <strong>Step 15: Run the full suite</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/ -v</code>
+Expected: all pass. If <code>test_cli_end_to_end</code> reports <code>kept &lt; 12</code>, the cleaning is too aggressive — inspect <code>corpus.json</code> and check which messages emptied out.</p>
+<ul>
+<li>[ ] <strong>Step 16: Commit</strong></li>
+</ul>
+<pre><code class="language-bash">git add scripts/ingest.py tests/test_ingest.py
+git commit -m &quot;feat: email ingestion with quote, signature, and duplicate removal&quot;
+</code></pre>
+<hr />
+<h2>Task 3: <code>fingerprint.py</code> — core metrics</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>scripts/fingerprint.py</code></li>
+<li>Test: <code>tests/test_fingerprint.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>
+<p>Consumes: <code>corpus.json</code> from Task 2.</p>
+</li>
+<li>
+<p>Produces:</p>
+<ul>
+<li><code>sentences(text: str) -&gt; list[str]</code></li>
+<li><code>paragraphs(text: str) -&gt; list[str]</code></li>
+<li><code>shape_metrics(messages: list[dict]) -&gt; dict</code> → <code>{&quot;words_per_email&quot;: {&quot;median&quot;: float, &quot;iqr&quot;: [float, float]}, &quot;words_per_sentence&quot;: {...}, &quot;sentences_per_paragraph&quot;: {...}, &quot;paragraphs_per_email&quot;: {...}}</code></li>
+<li><code>opener_pattern(body: str) -&gt; str</code> → one of <code>&quot;hi_name&quot;</code>, <code>&quot;hey_name&quot;</code>, <code>&quot;name_dash&quot;</code>, <code>&quot;bare_name&quot;</code>, <code>&quot;none&quot;</code></li>
+<li><code>closer_pattern(body: str) -&gt; dict</code> → <code>{&quot;signoff&quot;: str, &quot;name_form&quot;: str}</code></li>
+<li><code>contraction_rate(text: str) -&gt; float</code></li>
+<li><code>punct_rates(text: str) -&gt; dict</code> → per-100-word rates keyed <code>em_dash</code>, <code>ellipsis</code>, <code>exclamation</code>, <code>semicolon</code>, <code>parenthesis</code>, <code>emoji</code></li>
+<li><code>stance(text: str) -&gt; dict</code> → <code>{&quot;hedges_per_100w&quot;: float, &quot;imperative_rate&quot;: float, &quot;question_rate&quot;: float, &quot;bullet_rate&quot;: float}</code></li>
+<li><code>ask_placement(text: str) -&gt; float | None</code> → position of the ask as a fraction of email length, <code>None</code> when no ask found</li>
+<li><code>lexicon(messages: list[dict], baseline: dict, top_n: int = 15) -&gt; list[dict]</code></li>
+</ul>
+</li>
+<li>
+<p>[ ] <strong>Step 1: Write failing tests for text splitting and shape</strong></p>
+</li>
+</ul>
+<pre><code class="language-python"># tests/test_fingerprint.py
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / &quot;scripts&quot;))
+
+from fingerprint import (  # noqa: E402
+    ask_placement,
+    closer_pattern,
+    contraction_rate,
+    opener_pattern,
+    paragraphs,
+    punct_rates,
+    sentences,
+    shape_metrics,
+    stance,
+)
+
+
+def test_sentences_splits_on_terminators():
+    assert sentences(&quot;One. Two! Three? Four&quot;) == [&quot;One.&quot;, &quot;Two!&quot;, &quot;Three?&quot;, &quot;Four&quot;]
+
+
+def test_sentences_ignores_common_abbreviations():
+    assert len(sentences(&quot;Meet Dr. Webb at 5 p.m. tomorrow.&quot;)) == 1
+
+
+def test_paragraphs_split_on_blank_lines():
+    assert paragraphs(&quot;A\nB\n\nC&quot;) == [&quot;A\nB&quot;, &quot;C&quot;]
+
+
+def test_shape_metrics_median():
+    msgs = [{&quot;body&quot;: &quot;one two three&quot;}, {&quot;body&quot;: &quot;one two&quot;}, {&quot;body&quot;: &quot;one&quot;}]
+    assert shape_metrics(msgs)[&quot;words_per_email&quot;][&quot;median&quot;] == 2
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: Run to verify failure</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_fingerprint.py -v</code>
+Expected: FAIL — <code>ModuleNotFoundError: No module named 'fingerprint'</code></p>
+<ul>
+<li>[ ] <strong>Step 3: Implement splitting and shape metrics</strong></li>
+</ul>
+<pre><code class="language-python"># scripts/fingerprint.py
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import re
+import statistics
+from collections import Counter
+from pathlib import Path
+
+ABBREV = r&quot;(?&lt;!\bDr)(?&lt;!\bMr)(?&lt;!\bMrs)(?&lt;!\bMs)(?&lt;!\bSt)(?&lt;!\bp\.m)(?&lt;!\ba\.m)(?&lt;!\be\.g)(?&lt;!\bi\.e)&quot;
+SENTENCE_END = re.compile(ABBREV + r&quot;(?&lt;=[.!?])\s+(?=[A-Z0-9])&quot;)
+WORD = re.compile(r&quot;[A-Za-z']+&quot;)
+
+
+def sentences(text: str) -&gt; list[str]:
+    parts = [s.strip() for s in SENTENCE_END.split(text.strip()) if s.strip()]
+    return parts
+
+
+def paragraphs(text: str) -&gt; list[str]:
+    return [p.strip() for p in re.split(r&quot;\n\s*\n&quot;, text.strip()) if p.strip()]
+
+
+def _summary(values: list[float]) -&gt; dict:
+    if not values:
+        return {&quot;median&quot;: 0.0, &quot;iqr&quot;: [0.0, 0.0]}
+    ordered = sorted(values)
+    if len(ordered) &gt;= 4:
+        quartiles = statistics.quantiles(ordered, n=4)
+        iqr = [quartiles[0], quartiles[2]]
+    else:
+        iqr = [ordered[0], ordered[-1]]
+    return {&quot;median&quot;: statistics.median(ordered), &quot;iqr&quot;: iqr}
+
+
+def shape_metrics(messages: list[dict]) -&gt; dict:
+    words_per_email, words_per_sentence = [], []
+    sents_per_para, paras_per_email = [], []
+    for msg in messages:
+        body = msg[&quot;body&quot;]
+        words_per_email.append(len(WORD.findall(body)))
+        paras = paragraphs(body)
+        paras_per_email.append(len(paras))
+        for para in paras:
+            sents = sentences(para)
+            sents_per_para.append(len(sents))
+            for sent in sents:
+                words_per_sentence.append(len(WORD.findall(sent)))
+    return {
+        &quot;words_per_email&quot;: _summary(words_per_email),
+        &quot;words_per_sentence&quot;: _summary(words_per_sentence),
+        &quot;sentences_per_paragraph&quot;: _summary(sents_per_para),
+        &quot;paragraphs_per_email&quot;: _summary(paras_per_email),
+    }
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: Run to verify shape tests pass</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_fingerprint.py -v</code>
+Expected: 4 passed.</p>
+<ul>
+<li>[ ] <strong>Step 5: Write failing tests for openers, closers, and mechanics</strong></li>
+</ul>
+<pre><code class="language-python">def test_opener_patterns():
+    assert opener_pattern(&quot;Hi Priya,\n\nBody here.&quot;) == &quot;hi_name&quot;
+    assert opener_pattern(&quot;Hey Marcus -\n\nBody.&quot;) == &quot;hey_name&quot;
+    assert opener_pattern(&quot;Priya —\n\nBody.&quot;) == &quot;name_dash&quot;
+    assert opener_pattern(&quot;Priya,\n\nBody.&quot;) == &quot;bare_name&quot;
+    assert opener_pattern(&quot;Pushed the fix.&quot;) == &quot;none&quot;
+
+
+def test_closer_pattern():
+    result = closer_pattern(&quot;Body text.\n\nBest,\nDana Reyes&quot;)
+    assert result[&quot;signoff&quot;] == &quot;best&quot;
+    assert result[&quot;name_form&quot;] == &quot;full_name&quot;
+
+    result = closer_pattern(&quot;Body text.\n\n— Dana&quot;)
+    assert result[&quot;signoff&quot;] == &quot;none&quot;
+    assert result[&quot;name_form&quot;] == &quot;first_name&quot;
+
+
+def test_contraction_rate():
+    assert contraction_rate(&quot;I don't think we can't win&quot;) == 1.0
+    assert contraction_rate(&quot;I do not think it&quot;) == 0.0
+
+
+def test_punct_rates_per_100_words():
+    text = &quot; &quot;.join([&quot;word&quot;] * 100) + &quot; — !&quot;
+    rates = punct_rates(text)
+    assert rates[&quot;em_dash&quot;] == 1.0
+    assert rates[&quot;exclamation&quot;] == 1.0
+
+
+def test_stance_detects_hedges_and_questions():
+    result = stance(&quot;I just think maybe we should wait. Can you confirm?&quot;)
+    assert result[&quot;hedges_per_100w&quot;] &gt; 0
+    assert result[&quot;question_rate&quot;] == 0.5
+
+
+def test_ask_placement_front_vs_back():
+    front = &quot;Can you confirm by Thursday? The rest is context. More context here.&quot;
+    back = &quot;Here is context. More context follows. Can you confirm by Thursday?&quot;
+    assert ask_placement(front) &lt; 0.5
+    assert ask_placement(back) &gt; 0.5
+    assert ask_placement(&quot;No request in this text at all.&quot;) is None
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 6: Run to verify failure</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_fingerprint.py -v -k &quot;opener or closer or contraction or punct or stance or ask&quot;</code>
+Expected: FAIL — <code>ImportError: cannot import name 'opener_pattern'</code></p>
+<ul>
+<li>[ ] <strong>Step 7: Implement openers, closers, mechanics, stance, and ask placement</strong></li>
+</ul>
+<pre><code class="language-python">CONTRACTIBLE = re.compile(
+    r&quot;\b(do not|does not|did not|is not|are not|was not|were not|cannot|can not|&quot;
+    r&quot;will not|would not|should not|could not|have not|has not|had not|it is|&quot;
+    r&quot;that is|there is|I am|you are|we are|they are|I will|we will)\b&quot;,
+    re.IGNORECASE,
+)
+CONTRACTION = re.compile(r&quot;\b\w+'(t|s|re|ll|ve|d|m)\b&quot;, re.IGNORECASE)
+EMOJI = re.compile(&quot;[\U0001F300-\U0001FAFF\u2600-\u27BF]&quot;)
+HEDGES = re.compile(
+    r&quot;\b(just|i think|maybe|perhaps|sorry to|a bit|kind of|sort of|possibly|&quot;
+    r&quot;if that works|no rush|whenever you get a chance)\b&quot;,
+    re.IGNORECASE,
+)
+ASK = re.compile(
+    r&quot;(\?|\b(can you|could you|would you|please|let me know|need you to|&quot;
+    r&quot;send me|confirm|by (monday|tuesday|wednesday|thursday|friday|eod|end of))\b)&quot;,
+    re.IGNORECASE,
+)
+IMPERATIVE_START = re.compile(
+    r&quot;^(send|check|confirm|review|let|call|ping|see|take|hold|drop|add|move|use)\b&quot;,
+    re.IGNORECASE,
+)
+SIGNOFFS = [
+    &quot;best&quot;, &quot;thanks&quot;, &quot;thank you&quot;, &quot;cheers&quot;, &quot;regards&quot;, &quot;best regards&quot;,
+    &quot;talk soon&quot;, &quot;sincerely&quot;, &quot;all the best&quot;, &quot;appreciate it&quot;,
+]
+
+
+def opener_pattern(body: str) -&gt; str:
+    first = body.strip().split(&quot;\n&quot;, 1)[0].strip()
+    if re.match(r&quot;^hi\s+[A-Z][\w'-]*\b&quot;, first, re.IGNORECASE):
+        return &quot;hi_name&quot;
+    if re.match(r&quot;^(hey|hello)\s+[A-Z][\w'-]*\b&quot;, first, re.IGNORECASE):
+        return &quot;hey_name&quot;
+    if re.match(r&quot;^[A-Z][\w'-]*\s*[—–-]\s*$&quot;, first) or re.match(
+        r&quot;^[A-Z][\w'-]*\s*[—–-]\s+\S&quot;, first
+    ):
+        return &quot;name_dash&quot;
+    if re.match(r&quot;^[A-Z][\w'-]*,\s*$&quot;, first):
+        return &quot;bare_name&quot;
+    return &quot;none&quot;
+
+
+def closer_pattern(body: str) -&gt; dict:
+    tail = [ln.strip() for ln in body.strip().split(&quot;\n&quot;) if ln.strip()][-2:]
+    signoff = &quot;none&quot;
+    name_form = &quot;none&quot;
+    for line in tail:
+        cleaned = line.rstrip(&quot;,&quot;).strip().lower()
+        if cleaned in SIGNOFFS:
+            signoff = cleaned
+    last = tail[-1] if tail else &quot;&quot;
+    stripped = last.lstrip(&quot;—–-&quot;).strip().rstrip(&quot;,&quot;)
+    words = stripped.split()
+    if 1 &lt;= len(words) &lt;= 3 and all(w[:1].isupper() for w in words if w):
+        if len(words) == 1:
+            name_form = &quot;initial&quot; if len(words[0]) &lt;= 2 else &quot;first_name&quot;
+        else:
+            name_form = &quot;full_name&quot;
+    return {&quot;signoff&quot;: signoff, &quot;name_form&quot;: name_form}
+
+
+def contraction_rate(text: str) -&gt; float:
+    contracted = len(CONTRACTION.findall(text))
+    expanded = len(CONTRACTIBLE.findall(text))
+    total = contracted + expanded
+    return contracted / total if total else 0.0
+
+
+def _per_100(count: int, words: int) -&gt; float:
+    return round(count * 100 / words, 3) if words else 0.0
+
+
+def punct_rates(text: str) -&gt; dict:
+    words = len(WORD.findall(text))
+    return {
+        &quot;em_dash&quot;: _per_100(len(re.findall(r&quot;[—–]|--&quot;, text)), words),
+        &quot;ellipsis&quot;: _per_100(len(re.findall(r&quot;\.\.\.|…&quot;, text)), words),
+        &quot;exclamation&quot;: _per_100(text.count(&quot;!&quot;), words),
+        &quot;semicolon&quot;: _per_100(text.count(&quot;;&quot;), words),
+        &quot;parenthesis&quot;: _per_100(text.count(&quot;(&quot;), words),
+        &quot;emoji&quot;: _per_100(len(EMOJI.findall(text)), words),
+    }
+
+
+def stance(text: str) -&gt; dict:
+    words = len(WORD.findall(text))
+    sents = sentences(text)
+    questions = sum(1 for s in sents if s.rstrip().endswith(&quot;?&quot;))
+    imperatives = sum(1 for s in sents if IMPERATIVE_START.match(s))
+    bullets = sum(1 for ln in text.split(&quot;\n&quot;) if re.match(r&quot;^\s*[-*•]\s+&quot;, ln))
+    return {
+        &quot;hedges_per_100w&quot;: _per_100(len(HEDGES.findall(text)), words),
+        &quot;imperative_rate&quot;: round(imperatives / len(sents), 3) if sents else 0.0,
+        &quot;question_rate&quot;: round(questions / len(sents), 3) if sents else 0.0,
+        &quot;bullet_rate&quot;: round(bullets / len(sents), 3) if sents else 0.0,
+    }
+
+
+def ask_placement(text: str) -&gt; float | None:
+    sents = sentences(text)
+    for index, sent in enumerate(sents):
+        if ASK.search(sent):
+            return round(index / len(sents), 3)
+    return None
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 8: Run to verify all metric tests pass</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_fingerprint.py -v</code>
+Expected: 10 passed.</p>
+<ul>
+<li>[ ] <strong>Step 9: Write the failing lexicon test</strong></li>
+</ul>
+<pre><code class="language-python">from fingerprint import lexicon  # add to the import block
+
+
+def test_lexicon_surfaces_distinctive_phrases():
+    baseline = {
+        &quot;unigrams&quot;: {&quot;the&quot;: 0.05, &quot;a&quot;: 0.03, &quot;worth&quot;: 0.0001, &quot;look&quot;: 0.0002},
+        &quot;bigrams&quot;: {&quot;of the&quot;: 0.002, &quot;worth a&quot;: 0.000001},
+    }
+    msgs = [{&quot;body&quot;: &quot;worth a look at the numbers&quot;} for _ in range(10)]
+    phrases = [item[&quot;phrase&quot;] for item in lexicon(msgs, baseline, top_n=5)]
+    assert &quot;worth&quot; in phrases or &quot;worth a&quot; in phrases
+    assert &quot;the&quot; not in phrases
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 10: Run to verify failure</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_fingerprint.py -v -k lexicon</code>
+Expected: FAIL — <code>ImportError: cannot import name 'lexicon'</code></p>
+<ul>
+<li>[ ] <strong>Step 11: Implement the lexicon metric</strong></li>
+</ul>
+<pre><code class="language-python">SMOOTHING = 1e-7
+
+
+def lexicon(messages: list[dict], baseline: dict, top_n: int = 15) -&gt; list[dict]:
+    &quot;&quot;&quot;Rank the user's n-grams by log-odds against a common-English baseline.&quot;&quot;&quot;
+    words: list[str] = []
+    for msg in messages:
+        words.extend(w.lower() for w in WORD.findall(msg[&quot;body&quot;]))
+
+    uni = Counter(words)
+    bi = Counter(f&quot;{a} {b}&quot; for a, b in zip(words, words[1:]))
+    uni_total = sum(uni.values()) or 1
+    bi_total = sum(bi.values()) or 1
+
+    scored = []
+    for counts, total, base_key in (
+        (uni, uni_total, &quot;unigrams&quot;),
+        (bi, bi_total, &quot;bigrams&quot;),
+    ):
+        base = baseline.get(base_key, {})
+        for phrase, count in counts.items():
+            if count &lt; 3:
+                continue
+            observed = count / total
+            expected = base.get(phrase, SMOOTHING)
+            scored.append(
+                {
+                    &quot;phrase&quot;: phrase,
+                    &quot;count&quot;: count,
+                    &quot;log_odds&quot;: round(math.log(observed / expected), 3),
+                }
+            )
+    scored.sort(key=lambda item: item[&quot;log_odds&quot;], reverse=True)
+    return scored[:top_n]
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 12: Run the full suite</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/ -v</code>
+Expected: all pass.</p>
+<ul>
+<li>[ ] <strong>Step 13: Commit</strong></li>
+</ul>
+<pre><code class="language-bash">git add scripts/fingerprint.py tests/test_fingerprint.py
+git commit -m &quot;feat: core style metrics — shape, openers, mechanics, stance, lexicon&quot;
+</code></pre>
+<hr />
+<h2>Task 4: Register clustering, exemplar selection, and the fingerprint CLI</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>scripts/fingerprint.py</code></li>
+<li>Modify: <code>tests/test_fingerprint.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>
+<p>Consumes: everything from Task 3.</p>
+</li>
+<li>
+<p>Produces:</p>
+<ul>
+<li><code>classify_register(msg: dict, user_domain: str) -&gt; str</code> → one of <code>&quot;internal&quot;</code>, <code>&quot;client&quot;</code>, <code>&quot;cold_outreach&quot;</code>, <code>&quot;vendor&quot;</code>, <code>&quot;personal&quot;</code></li>
+<li><code>aggregate(messages: list[dict], baseline: dict) -&gt; dict</code> → full metric block for a message set</li>
+<li><code>select_exemplars(messages: list[dict], count: int = 4) -&gt; list[dict]</code></li>
+<li>CLI: <code>python scripts/fingerprint.py --corpus corpus.json --baseline fixtures/baseline_ngrams.json --out fingerprint.json --exemplars exemplars.json</code></li>
+<li><code>fingerprint.json</code> schema: <code>{&quot;user&quot;: str, &quot;corpus_size&quot;: int, &quot;date_range&quot;: [str, str], &quot;baseline&quot;: &lt;metric block&gt;, &quot;registers&quot;: {&quot;&lt;name&gt;&quot;: {&quot;count&quot;: int, &quot;metrics&quot;: &lt;metric block&gt;}}, &quot;suppressed_registers&quot;: {&quot;&lt;name&gt;&quot;: int}, &quot;english_metrics_valid&quot;: bool}</code></li>
+<li><code>exemplars.json</code> schema: <code>{&quot;&lt;register&gt;&quot;: [{&quot;subject&quot;: str, &quot;body&quot;: str, &quot;word_count&quot;: int}]}</code></li>
+</ul>
+</li>
+<li>
+<p>[ ] <strong>Step 1: Write failing tests for register classification</strong></p>
+</li>
+</ul>
+<pre><code class="language-python">from fingerprint import aggregate, classify_register, select_exemplars  # add to imports
+
+USER_DOMAIN = &quot;northwind-labs.com&quot;
+
+
+def test_classify_internal():
+    msg = {&quot;to_domains&quot;: [&quot;northwind-labs.com&quot;], &quot;is_reply&quot;: True, &quot;body&quot;: &quot;x&quot;}
+    assert classify_register(msg, USER_DOMAIN) == &quot;internal&quot;
+
+
+def test_classify_personal_consumer_domain():
+    msg = {&quot;to_domains&quot;: [&quot;gmail.com&quot;], &quot;is_reply&quot;: False, &quot;body&quot;: &quot;x&quot;}
+    assert classify_register(msg, USER_DOMAIN) == &quot;personal&quot;
+
+
+def test_classify_cold_outreach_is_non_reply_external():
+    msg = {&quot;to_domains&quot;: [&quot;harborline.com&quot;], &quot;is_reply&quot;: False, &quot;body&quot;: &quot;x&quot;}
+    assert classify_register(msg, USER_DOMAIN) == &quot;cold_outreach&quot;
+
+
+def test_classify_client_is_external_reply():
+    msg = {&quot;to_domains&quot;: [&quot;harborline.com&quot;], &quot;is_reply&quot;: True, &quot;body&quot;: &quot;x&quot;}
+    assert classify_register(msg, USER_DOMAIN) == &quot;client&quot;
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: Run to verify failure</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_fingerprint.py -v -k classify</code>
+Expected: FAIL — <code>ImportError: cannot import name 'classify_register'</code></p>
+<ul>
+<li>[ ] <strong>Step 3: Implement register classification and aggregation</strong></li>
+</ul>
+<pre><code class="language-python">CONSUMER_DOMAINS = {
+    &quot;gmail.com&quot;, &quot;yahoo.com&quot;, &quot;hotmail.com&quot;, &quot;outlook.com&quot;,
+    &quot;icloud.com&quot;, &quot;me.com&quot;, &quot;aol.com&quot;, &quot;proton.me&quot;,
+}
+VENDOR_HINTS = (&quot;billing&quot;, &quot;support&quot;, &quot;invoices&quot;, &quot;noreply&quot;, &quot;accounts&quot;)
+MIN_REGISTER_SIZE = 8
+MIN_CORPUS_SIZE = 12
+
+
+def classify_register(msg: dict, user_domain: str) -&gt; str:
+    domains = msg.get(&quot;to_domains&quot;) or []
+    if any(d == user_domain for d in domains):
+        return &quot;internal&quot;
+    if any(d in CONSUMER_DOMAINS for d in domains):
+        return &quot;personal&quot;
+    subject = (msg.get(&quot;subject&quot;) or &quot;&quot;).lower()
+    if any(hint in subject for hint in VENDOR_HINTS):
+        return &quot;vendor&quot;
+    return &quot;client&quot; if msg.get(&quot;is_reply&quot;) else &quot;cold_outreach&quot;
+
+
+def aggregate(messages: list[dict], baseline: dict) -&gt; dict:
+    joined = &quot;\n\n&quot;.join(m[&quot;body&quot;] for m in messages)
+    openers = Counter(opener_pattern(m[&quot;body&quot;]) for m in messages)
+    closers = Counter(closer_pattern(m[&quot;body&quot;])[&quot;signoff&quot;] for m in messages)
+    name_forms = Counter(closer_pattern(m[&quot;body&quot;])[&quot;name_form&quot;] for m in messages)
+    placements = [
+        p for p in (ask_placement(m[&quot;body&quot;]) for m in messages) if p is not None
+    ]
+    subjects = [m[&quot;subject&quot;] for m in messages if m[&quot;subject&quot;]]
+    return {
+        &quot;shape&quot;: shape_metrics(messages),
+        &quot;openers&quot;: {k: round(v / len(messages), 3) for k, v in openers.items()},
+        &quot;closers&quot;: {k: round(v / len(messages), 3) for k, v in closers.items()},
+        &quot;name_forms&quot;: {k: round(v / len(messages), 3) for k, v in name_forms.items()},
+        &quot;contraction_rate&quot;: round(contraction_rate(joined), 3),
+        &quot;punctuation&quot;: punct_rates(joined),
+        &quot;stance&quot;: stance(joined),
+        &quot;ask_placement_median&quot;: (
+            round(statistics.median(placements), 3) if placements else None
+        ),
+        &quot;subject&quot;: {
+            &quot;median_words&quot;: (
+                statistics.median([len(s.split()) for s in subjects])
+                if subjects else 0
+            ),
+            &quot;lowercase_rate&quot;: round(
+                sum(1 for s in subjects if s == s.lower()) / len(subjects), 3
+            ) if subjects else 0.0,
+            &quot;question_rate&quot;: round(
+                sum(1 for s in subjects if s.rstrip().endswith(&quot;?&quot;)) / len(subjects), 3
+            ) if subjects else 0.0,
+        },
+        &quot;lexicon&quot;: lexicon(messages, baseline),
+    }
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: Run to verify classification tests pass</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_fingerprint.py -v -k classify</code>
+Expected: 4 passed.</p>
+<ul>
+<li>[ ] <strong>Step 5: Write the failing exemplar-selection test</strong></li>
+</ul>
+<pre><code class="language-python">def test_select_exemplars_prefers_median_length_with_an_ask():
+    msgs = [
+        {&quot;subject&quot;: &quot;a&quot;, &quot;body&quot;: &quot;tiny&quot;, &quot;word_count&quot;: 1},
+        {&quot;subject&quot;: &quot;b&quot;, &quot;body&quot;: &quot;Can you confirm the date? &quot; + &quot;word &quot; * 40,
+         &quot;word_count&quot;: 45},
+        {&quot;subject&quot;: &quot;c&quot;, &quot;body&quot;: &quot;word &quot; * 400, &quot;word_count&quot;: 400},
+    ]
+    picked = select_exemplars(msgs, count=1)
+    assert picked[0][&quot;subject&quot;] == &quot;b&quot;
+
+
+def test_select_exemplars_respects_count():
+    msgs = [
+        {&quot;subject&quot;: str(i), &quot;body&quot;: &quot;Can you confirm? &quot; + &quot;word &quot; * 30,
+         &quot;word_count&quot;: 33}
+        for i in range(10)
+    ]
+    assert len(select_exemplars(msgs, count=4)) == 4
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 6: Run to verify failure</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_fingerprint.py -v -k exemplar</code>
+Expected: FAIL — <code>ImportError: cannot import name 'select_exemplars'</code></p>
+<ul>
+<li>[ ] <strong>Step 7: Implement exemplar selection</strong></li>
+</ul>
+<pre><code class="language-python">def select_exemplars(messages: list[dict], count: int = 4) -&gt; list[dict]:
+    &quot;&quot;&quot;Pick messages that best demonstrate the voice: near-median length, with an ask.&quot;&quot;&quot;
+    if not messages:
+        return []
+    median_words = statistics.median(m[&quot;word_count&quot;] for m in messages)
+
+    def score(msg: dict) -&gt; float:
+        spread = abs(msg[&quot;word_count&quot;] - median_words) / (median_words or 1)
+        has_ask = 1.0 if ASK.search(msg[&quot;body&quot;]) else 0.0
+        multi_para = 0.3 if len(paragraphs(msg[&quot;body&quot;])) &gt; 1 else 0.0
+        return has_ask + multi_para - spread
+
+    ranked = sorted(messages, key=score, reverse=True)
+    return [
+        {&quot;subject&quot;: m[&quot;subject&quot;], &quot;body&quot;: m[&quot;body&quot;], &quot;word_count&quot;: m[&quot;word_count&quot;]}
+        for m in ranked[:count]
+    ]
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 8: Run to verify exemplar tests pass</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_fingerprint.py -v -k exemplar</code>
+Expected: 2 passed.</p>
+<ul>
+<li>[ ] <strong>Step 9: Add the CLI</strong></li>
+</ul>
+<pre><code class="language-python">NON_ASCII_THRESHOLD = 0.15
+
+
+def _english_likely(messages: list[dict]) -&gt; bool:
+    joined = &quot;&quot;.join(m[&quot;body&quot;] for m in messages)
+    if not joined:
+        return True
+    non_ascii = sum(1 for ch in joined if ord(ch) &gt; 127)
+    return non_ascii / len(joined) &lt; NON_ASCII_THRESHOLD
+
+
+def main() -&gt; int:
+    ap = argparse.ArgumentParser(description=&quot;Compute a style fingerprint.&quot;)
+    ap.add_argument(&quot;--corpus&quot;, required=True)
+    ap.add_argument(&quot;--baseline&quot;, required=True)
+    ap.add_argument(&quot;--out&quot;, required=True)
+    ap.add_argument(&quot;--exemplars&quot;, required=True)
+    args = ap.parse_args()
+
+    corpus = json.loads(Path(args.corpus).read_text(encoding=&quot;utf-8&quot;))
+    baseline = json.loads(Path(args.baseline).read_text(encoding=&quot;utf-8&quot;))
+    messages = corpus[&quot;messages&quot;]
+
+    if len(messages) &lt; MIN_CORPUS_SIZE:
+        print(
+            f&quot;ERROR: {len(messages)} usable messages, need {MIN_CORPUS_SIZE}. &quot;
+            f&quot;Parsed {corpus['stats']['raw']}, &quot;
+            f&quot;dropped {corpus['stats']['raw'] - len(messages)} as quoted-only, &quot;
+            f&quot;auto-replies, duplicates, or too short.&quot;
+        )
+        return 1
+
+    user_domain = corpus[&quot;user&quot;].split(&quot;@&quot;, 1)[1].lower()
+    buckets: dict[str, list[dict]] = {}
+    for msg in messages:
+        buckets.setdefault(classify_register(msg, user_domain), []).append(msg)
+
+    registers, suppressed = {}, {}
+    for name, group in buckets.items():
+        if len(group) &gt;= MIN_REGISTER_SIZE:
+            registers[name] = {&quot;count&quot;: len(group), &quot;metrics&quot;: aggregate(group, baseline)}
+        else:
+            suppressed[name] = len(group)
+
+    dates = sorted(m[&quot;date&quot;] for m in messages if m[&quot;date&quot;])
+    fingerprint = {
+        &quot;user&quot;: corpus[&quot;user&quot;],
+        &quot;corpus_size&quot;: len(messages),
+        &quot;date_range&quot;: [dates[0], dates[-1]] if dates else [&quot;&quot;, &quot;&quot;],
+        &quot;baseline&quot;: aggregate(messages, baseline),
+        &quot;registers&quot;: registers,
+        &quot;suppressed_registers&quot;: suppressed,
+        &quot;english_metrics_valid&quot;: _english_likely(messages),
+    }
+    Path(args.out).write_text(json.dumps(fingerprint, indent=2), encoding=&quot;utf-8&quot;)
+
+    exemplars = {name: select_exemplars(group) for name, group in buckets.items()}
+    if corpus.get(&quot;terse_ack&quot;):
+        exemplars[&quot;terse_ack&quot;] = select_exemplars(corpus[&quot;terse_ack&quot;], count=3)
+    Path(args.exemplars).write_text(json.dumps(exemplars, indent=2), encoding=&quot;utf-8&quot;)
+
+    print(
+        f&quot;{len(messages)} messages, {len(registers)} registers &quot;
+        f&quot;-&gt; {args.out}, {args.exemplars}&quot;
+    )
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    raise SystemExit(main())
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 10: Write the CLI test against the fixture corpus</strong></li>
+</ul>
+<pre><code class="language-python">import json
+import subprocess
+
+
+def test_fingerprint_cli_on_synthetic_corpus(tmp_path):
+    root = Path(__file__).parent.parent
+    corpus = tmp_path / &quot;corpus.json&quot;
+    subprocess.run(
+        [sys.executable, str(root / &quot;scripts&quot; / &quot;ingest.py&quot;),
+         &quot;--eml-dir&quot;, str(root / &quot;fixtures&quot; / &quot;synthetic&quot;),
+         &quot;--user&quot;, &quot;dana@northwind-labs.com&quot;, &quot;--out&quot;, str(corpus)],
+        check=True, capture_output=True,
+    )
+    fp = tmp_path / &quot;fingerprint.json&quot;
+    ex = tmp_path / &quot;exemplars.json&quot;
+    result = subprocess.run(
+        [sys.executable, str(root / &quot;scripts&quot; / &quot;fingerprint.py&quot;),
+         &quot;--corpus&quot;, str(corpus),
+         &quot;--baseline&quot;, str(root / &quot;fixtures&quot; / &quot;baseline_ngrams.json&quot;),
+         &quot;--out&quot;, str(fp), &quot;--exemplars&quot;, str(ex)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(fp.read_text(encoding=&quot;utf-8&quot;))
+
+    # Dana's designed traits must be recovered from the data
+    assert data[&quot;baseline&quot;][&quot;shape&quot;][&quot;words_per_email&quot;][&quot;median&quot;] &lt; 120
+    assert &quot;internal&quot; in data[&quot;registers&quot;]
+    assert data[&quot;baseline&quot;][&quot;punctuation&quot;][&quot;em_dash&quot;] &gt; 0
+    phrases = [item[&quot;phrase&quot;] for item in data[&quot;baseline&quot;][&quot;lexicon&quot;]]
+    assert any(&quot;worth&quot; in p for p in phrases)
+
+    exemplars = json.loads(ex.read_text(encoding=&quot;utf-8&quot;))
+    assert exemplars[&quot;internal&quot;]
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 11: Run the full suite</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/ -v</code>
+Expected: all pass. If the <code>worth</code> assertion fails, the fixture corpus does not repeat the pet phrase often enough — add it to more messages rather than weakening the test.</p>
+<ul>
+<li>[ ] <strong>Step 12: Commit</strong></li>
+</ul>
+<pre><code class="language-bash">git add scripts/fingerprint.py tests/test_fingerprint.py
+git commit -m &quot;feat: register clustering, exemplar selection, fingerprint CLI&quot;
+</code></pre>
+<hr />
+<h2>Task 5: <code>redact.py</code> — PII scrubbing</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>scripts/redact.py</code></li>
+<li>Test: <code>tests/test_redact.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>
+<p>Consumes: <code>exemplars.json</code> from Task 4.</p>
+</li>
+<li>
+<p>Produces:</p>
+<ul>
+<li><code>redact(text: str, keep_names: set[str] | None = None) -&gt; str</code></li>
+<li><code>redact_exemplars(data: dict, keep_names: set[str]) -&gt; dict</code></li>
+<li>CLI: <code>python scripts/redact.py --in exemplars.json --out exemplars.redacted.json --keep-name Dana</code></li>
+</ul>
+</li>
+<li>
+<p>[ ] <strong>Step 1: Write the failing tests</strong></p>
+</li>
+</ul>
+<pre><code class="language-python"># tests/test_redact.py
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / &quot;scripts&quot;))
+
+from redact import redact  # noqa: E402
+
+
+def test_redacts_email_addresses():
+    assert &quot;priya@harborline.com&quot; not in redact(&quot;Ping priya@harborline.com today&quot;)
+    assert &quot;[EMAIL]&quot; in redact(&quot;Ping priya@harborline.com today&quot;)
+
+
+def test_redacts_phone_numbers():
+    assert &quot;[PHONE]&quot; in redact(&quot;Call +1 555 018 2299 tomorrow&quot;)
+
+
+def test_redacts_urls():
+    assert &quot;[URL]&quot; in redact(&quot;See https://harborline.com/deck for details&quot;)
+
+
+def test_redacts_currency():
+    assert &quot;[$AMOUNT]&quot; in redact(&quot;The contract is $47,500 for the year&quot;)
+
+
+def test_preserves_the_users_own_first_name():
+    assert &quot;Dana&quot; in redact(&quot;Thanks,\nDana&quot;, keep_names={&quot;Dana&quot;})
+
+
+def test_preserves_dates_and_weekdays():
+    out = redact(&quot;Can you confirm by Thursday, April 17?&quot;)
+    assert &quot;Thursday&quot; in out and &quot;April&quot; in out
+
+
+def test_preserves_length_within_tolerance():
+    &quot;&quot;&quot;Rhythm is what we're modeling — redaction must replace, not delete.&quot;&quot;&quot;
+    original = &quot;Hi Priya, the invoice for $4,200 goes to priya@harborline.com today.&quot;
+    ratio = len(redact(original)) / len(original)
+    assert 0.7 &lt; ratio &lt; 1.4
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: Run to verify failure</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_redact.py -v</code>
+Expected: FAIL — <code>ModuleNotFoundError: No module named 'redact'</code></p>
+<ul>
+<li>[ ] <strong>Step 3: Implement redaction</strong></li>
+</ul>
+<pre><code class="language-python"># scripts/redact.py
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from pathlib import Path
+
+PATTERNS = [
+    (re.compile(r&quot;\b[\w.+-]+@[\w-]+\.[\w.]+\b&quot;), &quot;[EMAIL]&quot;),
+    (re.compile(r&quot;https?://\S+|\bwww\.\S+&quot;), &quot;[URL]&quot;),
+    (re.compile(r&quot;\$\s?\d[\d,]*(?:\.\d{2})?\b&quot;), &quot;[$AMOUNT]&quot;),
+    (re.compile(r&quot;(?&lt;!\w)\+?\d[\d\s().-]{8,}\d(?!\w)&quot;), &quot;[PHONE]&quot;),
+    (re.compile(r&quot;\b\d{1,5}\s+[A-Z][a-z]+\s+(Street|St|Avenue|Ave|Road|Rd|Blvd)\b&quot;),
+     &quot;[ADDRESS]&quot;),
+]
+
+WEEKDAYS_MONTHS = {
+    &quot;monday&quot;, &quot;tuesday&quot;, &quot;wednesday&quot;, &quot;thursday&quot;, &quot;friday&quot;, &quot;saturday&quot;, &quot;sunday&quot;,
+    &quot;january&quot;, &quot;february&quot;, &quot;march&quot;, &quot;april&quot;, &quot;may&quot;, &quot;june&quot;, &quot;july&quot;, &quot;august&quot;,
+    &quot;september&quot;, &quot;october&quot;, &quot;november&quot;, &quot;december&quot;,
+    &quot;mon&quot;, &quot;tue&quot;, &quot;wed&quot;, &quot;thu&quot;, &quot;fri&quot;, &quot;sat&quot;, &quot;sun&quot;,
+    &quot;jan&quot;, &quot;feb&quot;, &quot;mar&quot;, &quot;apr&quot;, &quot;jun&quot;, &quot;jul&quot;, &quot;aug&quot;, &quot;sep&quot;, &quot;oct&quot;, &quot;nov&quot;, &quot;dec&quot;,
+}
+
+# Capitalized words in salutation or signoff position are almost always people.
+SALUTATION = re.compile(
+    r&quot;^(Hi|Hey|Hello|Dear)\s+([A-Z][\w'-]+)&quot;, re.MULTILINE
+)
+SIGNOFF_NAME = re.compile(
+    r&quot;^(Best|Thanks|Cheers|Regards|Sincerely|Best regards),?\s*\n\s*([A-Z][\w'-]+&quot;
+    r&quot;(?:\s+[A-Z][\w'-]+)?)\s*$&quot;,
+    re.MULTILINE,
+)
+
+
+def redact(text: str, keep_names: set[str] | None = None) -&gt; str:
+    keep = {n.lower() for n in (keep_names or set())}
+
+    for pattern, placeholder in PATTERNS:
+        text = pattern.sub(placeholder, text)
+
+    def _salutation(match: re.Match) -&gt; str:
+        greeting, name = match.group(1), match.group(2)
+        if name.lower() in keep or name.lower() in WEEKDAYS_MONTHS:
+            return match.group(0)
+        return f&quot;{greeting} [FIRST]&quot;
+
+    text = SALUTATION.sub(_salutation, text)
+
+    def _signoff(match: re.Match) -&gt; str:
+        closer, name = match.group(1), match.group(2)
+        if name.split()[0].lower() in keep:
+            return match.group(0)
+        return f&quot;{closer},\n[FIRST]&quot;
+
+    return SIGNOFF_NAME.sub(_signoff, text)
+
+
+def redact_exemplars(data: dict, keep_names: set[str]) -&gt; dict:
+    return {
+        register: [
+            {**ex, &quot;body&quot;: redact(ex[&quot;body&quot;], keep_names),
+             &quot;subject&quot;: redact(ex[&quot;subject&quot;], keep_names)}
+            for ex in items
+        ]
+        for register, items in data.items()
+    }
+
+
+def main() -&gt; int:
+    ap = argparse.ArgumentParser(description=&quot;Scrub PII from exemplars.&quot;)
+    ap.add_argument(&quot;--in&quot;, dest=&quot;src&quot;, required=True)
+    ap.add_argument(&quot;--out&quot;, required=True)
+    ap.add_argument(&quot;--keep-name&quot;, action=&quot;append&quot;, default=[],
+                    help=&quot;Name to preserve, repeatable. Use the profile owner's name.&quot;)
+    args = ap.parse_args()
+
+    data = json.loads(Path(args.src).read_text(encoding=&quot;utf-8&quot;))
+    result = redact_exemplars(data, set(args.keep_name))
+    Path(args.out).write_text(json.dumps(result, indent=2), encoding=&quot;utf-8&quot;)
+    print(f&quot;redacted -&gt; {args.out}&quot;)
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    raise SystemExit(main())
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: Run to verify tests pass</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_redact.py -v</code>
+Expected: 7 passed.</p>
+<ul>
+<li>[ ] <strong>Step 5: Add the residual-PII sweep test</strong></li>
+</ul>
+<pre><code class="language-python">import json
+import re
+import subprocess
+
+
+def test_no_raw_emails_survive_full_pipeline(tmp_path):
+    &quot;&quot;&quot;Belt and braces: run the real fixture corpus through and grep the output.&quot;&quot;&quot;
+    root = Path(__file__).parent.parent
+    corpus, fp = tmp_path / &quot;corpus.json&quot;, tmp_path / &quot;fp.json&quot;
+    ex, red = tmp_path / &quot;ex.json&quot;, tmp_path / &quot;red.json&quot;
+
+    subprocess.run(
+        [sys.executable, str(root / &quot;scripts&quot; / &quot;ingest.py&quot;),
+         &quot;--eml-dir&quot;, str(root / &quot;fixtures&quot; / &quot;synthetic&quot;),
+         &quot;--user&quot;, &quot;dana@northwind-labs.com&quot;, &quot;--out&quot;, str(corpus)],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        [sys.executable, str(root / &quot;scripts&quot; / &quot;fingerprint.py&quot;),
+         &quot;--corpus&quot;, str(corpus),
+         &quot;--baseline&quot;, str(root / &quot;fixtures&quot; / &quot;baseline_ngrams.json&quot;),
+         &quot;--out&quot;, str(fp), &quot;--exemplars&quot;, str(ex)],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        [sys.executable, str(root / &quot;scripts&quot; / &quot;redact.py&quot;),
+         &quot;--in&quot;, str(ex), &quot;--out&quot;, str(red), &quot;--keep-name&quot;, &quot;Dana&quot;],
+        check=True, capture_output=True,
+    )
+    text = red.read_text(encoding=&quot;utf-8&quot;)
+    assert not re.search(r&quot;[\w.+-]+@[\w-]+\.\w+&quot;, text), &quot;raw email address survived&quot;
+    assert not re.search(r&quot;\+?\d[\d\s().-]{8,}\d&quot;, text), &quot;raw phone number survived&quot;
+    assert &quot;Dana&quot; in text, &quot;profile owner's name should be preserved&quot;
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 6: Run the full suite</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/ -v</code>
+Expected: all pass.</p>
+<ul>
+<li>[ ] <strong>Step 7: Commit</strong></li>
+</ul>
+<pre><code class="language-bash">git add scripts/redact.py tests/test_redact.py
+git commit -m &quot;feat: PII redaction preserving rhythm and the profile owner's name&quot;
+</code></pre>
+<hr />
+<h2>Task 6: Plugin manifests and the analyze mode</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>.claude-plugin/plugin.json</code></li>
+<li>Create: <code>.claude-plugin/marketplace.json</code></li>
+<li>Create: <code>skills/write-as-me/SKILL.md</code></li>
+<li>Create: <code>commands/wam.md</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>
+<p>Consumes: all four scripts via their CLIs.</p>
+</li>
+<li>
+<p>Produces: <code>/write-as-me</code> and <code>/wam</code> commands; a profile at <code>~/.claude/wam/&lt;name&gt;.md</code>.</p>
+</li>
+<li>
+<p>[ ] <strong>Step 1: Write <code>.claude-plugin/plugin.json</code></strong></p>
+</li>
+</ul>
+<pre><code class="language-json">{
+  &quot;name&quot;: &quot;write-as-me&quot;,
+  &quot;version&quot;: &quot;0.1.0&quot;,
+  &quot;description&quot;: &quot;Learns your email writing style from your sent mail and drafts new email in your voice.&quot;,
+  &quot;author&quot;: {
+    &quot;name&quot;: &quot;Ken Arakelian&quot;,
+    &quot;url&quot;: &quot;https://github.com/kenarakelian1&quot;
+  },
+  &quot;homepage&quot;: &quot;https://github.com/kenarakelian1/write-as-me&quot;,
+  &quot;license&quot;: &quot;MIT&quot;,
+  &quot;keywords&quot;: [&quot;email&quot;, &quot;writing&quot;, &quot;style&quot;, &quot;voice&quot;, &quot;gmail&quot;]
+}
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: Write <code>.claude-plugin/marketplace.json</code></strong></li>
+</ul>
+<pre><code class="language-json">{
+  &quot;name&quot;: &quot;write-as-me&quot;,
+  &quot;owner&quot;: {
+    &quot;name&quot;: &quot;Ken Arakelian&quot;,
+    &quot;url&quot;: &quot;https://github.com/kenarakelian1&quot;
+  },
+  &quot;plugins&quot;: [
+    {
+      &quot;name&quot;: &quot;write-as-me&quot;,
+      &quot;source&quot;: &quot;./&quot;,
+      &quot;description&quot;: &quot;Learns your email writing style from your sent mail and drafts new email in your voice.&quot;
+    }
+  ]
+}
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 3: Write <code>skills/write-as-me/SKILL.md</code> — frontmatter and mode routing</strong></li>
+</ul>
+<pre><code class="language-markdown">---
+name: write-as-me
+description: Use when the user wants email written in their own voice, wants to analyze their writing style, or asks to build or refresh a personal style profile. Triggers on &quot;write as me&quot;, &quot;in my voice&quot;, &quot;sounds like me&quot;, &quot;draft this email&quot;, &quot;/wam&quot;.
+---
+
+# write-as-me
+
+Two modes. Pick by whether the user supplied an intent.
+
+| Invocation | Mode |
+| --- | --- |
+| `/write-as-me` or `/wam`, no arguments | **Analyze** — build the style profile |
+| `/write-as-me &lt;what to say&gt;` | **Write** — draft using the existing profile |
+| `--refresh` present | **Analyze**, overwriting the existing profile |
+
+Profiles live in `~/.claude/wam/`. Never write a profile into a repository.
+Scripts referenced below live in this plugin's `scripts/` directory.
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: Add the analyze-mode body to <code>SKILL.md</code></strong></li>
+</ul>
+<pre><code class="language-markdown">## Analyze mode
+
+If `~/.claude/wam/default.md` already exists and `--refresh` was not passed, tell the
+user it exists, show its metadata line, and ask whether to refresh or switch to write
+mode. Do not silently overwrite.
+
+### Step 1 — Find the mail
+
+Try in order and announce which tier you used.
+
+**Tier 1, Gmail connector.** If Gmail tools are available, search `in:sent -in:chats`
+over the last 12 months. Fetch up to 150 messages. Write them to
+`~/.claude/wam/cache/raw.json` as a JSON array of
+`{id, from, to, cc, subject, date, body}`.
+
+**Tier 2, local export.** Look for `.mbox` or `.eml` files in `./emails/`. If nothing
+is there, ask the user for a path. Google Takeout, Outlook, and Apple Mail exports all
+work.
+
+**Tier 3, paste.** Ask the user to paste 15–30 sent emails. Write them into the same
+`raw.json` shape.
+
+Ask for the user's own email address if you cannot infer it from the data.
+
+### Step 2 — Run the pipeline
+
+```bash
+python scripts/ingest.py --json ~/.claude/wam/cache/raw.json \
+  --user &lt;EMAIL&gt; --out ~/.claude/wam/cache/corpus.json
+
+python scripts/fingerprint.py --corpus ~/.claude/wam/cache/corpus.json \
+  --baseline fixtures/baseline_ngrams.json \
+  --out ~/.claude/wam/cache/fingerprint.json \
+  --exemplars ~/.claude/wam/cache/exemplars.json
+
+python scripts/redact.py --in ~/.claude/wam/cache/exemplars.json \
+  --out ~/.claude/wam/cache/exemplars.redacted.json --keep-name &lt;FIRST NAME&gt;
+```
+
+Use `--eml-dir` or `--mbox` instead of `--json` for Tier 2.
+
+If `fingerprint.py` exits non-zero with a corpus-size error, relay its message
+verbatim and stop. Do not generate a profile from fewer than 12 messages.
+
+### Step 3 — Read the small artifacts
+
+Read `fingerprint.json` and `exemplars.redacted.json`. **Never read `corpus.json` or
+`raw.json`** — they hold the full unredacted corpus and will flood context.
+
+### Step 4 — Verify the redaction
+
+Scan the redacted exemplars for anything the regexes missed: person names in the body,
+company names, project code names, account numbers. Replace with `[FIRST]`,
+`[COMPANY]`, `[PROJECT]`. Keep the owner's own first name in signoffs.
+
+Never present an exemplar you have not personally checked.
+
+### Step 5 — Write the profile
+
+Write `~/.claude/wam/default.md` in this exact structure.
+
+Rules for the prose:
+- **Directives, not description.** &quot;Median 68 words; over 120 is off-voice&quot; — not
+  &quot;concise and direct.&quot;
+- Every claim carries its number.
+- The **Never do this** section is the most valuable part. Derive it from what is
+  *absent*: signoffs at 0%, zero exclamation marks to clients, hedges below baseline.
+  Include the standard AI tells the corpus never uses — &quot;I hope this finds you well&quot;,
+  &quot;circle back&quot;, &quot;touch base&quot;, &quot;reach out&quot;, &quot;delve&quot;, &quot;leverage&quot; as a verb.
+- Register sections state *deltas* from baseline, never repeat the full metric block.
+- If `english_metrics_valid` is false, omit contraction rate and hedge markers, and
+  note the omission.
+- Name suppressed registers with their counts so the user knows what was too thin.
+
+```markdown
+# How to write as &lt;Name&gt;
+
+## Core directives
+- Median length &lt;N&gt; words. Over &lt;N*1.8&gt; is off-voice.
+- Open with &quot;&lt;pattern&gt;&quot; (&lt;X&gt;%) ... 
+- Put the ask &lt;early/late&gt;: median position &lt;X&gt; of the way in.
+- &lt;contraction guidance&gt;, &lt;punctuation tics with rates&gt;
+
+## Never do this
+- Never opens with &quot;I hope this finds you well.&quot;
+- &lt;absence-derived rules with counts&gt;
+
+## By audience
+| Register | Messages | Delta from baseline |
+| --- | --- | --- |
+
+## Examples
+### &lt;Register&gt; — &lt;what it does&gt;
+&lt;redacted exemplar&gt;
+
+## Metadata
+Corpus: &lt;N&gt; messages, &lt;start&gt; to &lt;end&gt;. Registers: &lt;list&gt;.
+Too thin to profile: &lt;suppressed with counts&gt;. Generated &lt;date&gt;.
+```
+
+### Step 6 — Clean up and report
+
+Delete `~/.claude/wam/cache/` unless the user passed `--keep-cache`. Report: tier used,
+messages analyzed, registers found, profile path. Show the **Never do this** list, since
+it is the most immediately useful part, and offer to draft something as a test.
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 5: Write <code>commands/wam.md</code></strong></li>
+</ul>
+<pre><code class="language-markdown">---
+description: Write email in your own voice (alias for /write-as-me)
+---
+
+Invoke the `write-as-me` skill with these arguments: $ARGUMENTS
+
+If no arguments were supplied, run analyze mode. Otherwise run write mode.
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 6: Verify the plugin loads</strong></li>
+</ul>
+<p>Run: <code>/plugin marketplace add C:\Users\Ken\Documents\GitHub\write-as-me</code> then
+<code>/plugin install write-as-me</code>, then check <code>/help</code> lists both <code>/write-as-me</code> and <code>/wam</code>.</p>
+<p>Expected: both commands appear. If not, validate both JSON manifests parse:
+<code>python -c &quot;import json,pathlib; [json.loads(pathlib.Path(p).read_text(encoding='utf-8')) for p in ['.claude-plugin/plugin.json','.claude-plugin/marketplace.json']]; print('ok')&quot;</code></p>
+<ul>
+<li>[ ] <strong>Step 7: Run analyze mode against the fixtures end to end</strong></li>
+</ul>
+<p>Run <code>/write-as-me</code> and, when it asks for a source, give it
+<code>fixtures/synthetic</code> as an eml directory with user <code>dana@northwind-labs.com</code>.</p>
+<p>Expected: a profile at <code>~/.claude/wam/default.md</code> describing Dana — short emails, em
+dashes, &quot;worth a look&quot; in the lexicon, an internal register distinct from client.</p>
+<p>If the profile reads generically (&quot;professional and friendly&quot;), the Step 5 rules are
+not being followed; tighten the directive language in <code>SKILL.md</code> rather than accepting
+the output.</p>
+<ul>
+<li>[ ] <strong>Step 8: Commit</strong></li>
+</ul>
+<pre><code class="language-bash">git add .claude-plugin skills commands
+git commit -m &quot;feat: plugin manifests, skill definition, analyze mode&quot;
+</code></pre>
+<hr />
+<h2>Task 7: Write mode</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>skills/write-as-me/SKILL.md</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>
+<p>Consumes: <code>~/.claude/wam/default.md</code> from Task 6.</p>
+</li>
+<li>
+<p>Produces: drafts in chat; optional Gmail draft creation.</p>
+</li>
+<li>
+<p>[ ] <strong>Step 1: Append the write-mode section to <code>SKILL.md</code></strong></p>
+</li>
+</ul>
+<pre><code class="language-markdown">## Write mode
+
+Triggered when the user supplies an intent: `/wam ask Priya to confirm the Q3 date`.
+
+### Step 1 — Load the profile
+
+Read `~/.claude/wam/default.md`. If it is missing, say so and offer to run analyze
+mode. Do not draft from a guess about the user's voice.
+
+### Step 2 — Pick the register
+
+Infer from the recipient if the user named one: own domain → `internal`, consumer
+domain → `personal`, otherwise `client`. Ask only when genuinely ambiguous and the
+registers differ materially. One question maximum — do not interrogate.
+
+If the chosen register was suppressed for thinness, use the baseline and say so.
+
+### Step 3 — Draft
+
+Imitate the exemplars for that register first and the metrics second. The exemplars
+carry the voice; the metrics are guardrails.
+
+Match: length band, opener, ask placement, signoff and name form, punctuation habits,
+paragraph count.
+
+### Step 4 — Self-check before showing anything
+
+Check the draft against the profile:
+
+1. Word count inside the band? If over, cut — do not compress by deleting articles.
+2. Any phrase from **Never do this**? Rewrite it out.
+3. Opener and signoff match the register's dominant pattern?
+4. Ask in the right position?
+5. Punctuation rates roughly in line — especially exclamation marks?
+
+Revise silently and show only the final draft. Do not narrate the checklist.
+
+### Step 5 — Present
+
+Show subject and body as plain text, ready to copy. Add one line naming the register
+used. If Gmail tools are available, offer to save it as a draft.
+
+**Never send email.** Creating a draft is the furthest this skill goes, and only when
+the user asks.
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: Test write mode against the Dana profile</strong></li>
+</ul>
+<p>With the fixture-derived profile in place, run:
+<code>/wam ask Priya to confirm the Q3 rollout date by Thursday</code></p>
+<p>Expected: under ~80 words, opens <code>Hi Priya</code>, ask in the first two sentences, em dash
+present, no exclamation mark, signs off <code>Best,</code> / <code>Dana Reyes</code>.</p>
+<ul>
+<li>[ ] <strong>Step 3: Test the missing-profile path</strong></li>
+</ul>
+<p>Temporarily rename <code>~/.claude/wam/default.md</code>, run <code>/wam draft a note to Marcus</code>.</p>
+<p>Expected: the skill offers to run analysis rather than inventing a voice. Rename back.</p>
+<ul>
+<li>[ ] <strong>Step 4: Commit</strong></li>
+</ul>
+<pre><code class="language-bash">git add skills/write-as-me/SKILL.md
+git commit -m &quot;feat: write mode with anti-pattern self-check&quot;
+</code></pre>
+<hr />
+<h2>Task 8: Holdout eval and README</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>scripts/eval_holdout.py</code></li>
+<li>Create: <code>README.md</code></li>
+<li>Test: <code>tests/test_eval.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>
+<p>Consumes: <code>fingerprint.py</code> functions, a corpus, and generated drafts.</p>
+</li>
+<li>
+<p>Produces:</p>
+<ul>
+<li><code>compare(a: dict, b: dict) -&gt; dict</code> → <code>{&quot;&lt;metric&gt;&quot;: float}</code> absolute deltas over flattened scalar metrics</li>
+<li><code>verdict(profile_deltas: dict, control_deltas: dict) -&gt; dict</code> → <code>{&quot;metrics_compared&quot;: int, &quot;profile_closer&quot;: int, &quot;share&quot;: float, &quot;pass&quot;: bool}</code></li>
+<li>CLI: <code>python scripts/eval_holdout.py --holdout holdout.json --profile-drafts drafts.json --control-drafts control.json --baseline fixtures/baseline_ngrams.json</code></li>
+</ul>
+</li>
+<li>
+<p>[ ] <strong>Step 1: Write the failing tests</strong></p>
+</li>
+</ul>
+<pre><code class="language-python"># tests/test_eval.py
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / &quot;scripts&quot;))
+
+from eval_holdout import compare, flatten, verdict  # noqa: E402
+
+
+def test_flatten_produces_scalar_paths():
+    nested = {&quot;shape&quot;: {&quot;words_per_email&quot;: {&quot;median&quot;: 68.0, &quot;iqr&quot;: [40, 90]}},
+              &quot;contraction_rate&quot;: 0.4}
+    flat = flatten(nested)
+    assert flat[&quot;shape.words_per_email.median&quot;] == 68.0
+    assert flat[&quot;contraction_rate&quot;] == 0.4
+    assert &quot;shape.words_per_email.iqr&quot; not in flat  # lists are skipped
+
+
+def test_compare_returns_absolute_deltas():
+    a = {&quot;contraction_rate&quot;: 0.4}
+    b = {&quot;contraction_rate&quot;: 0.1}
+    assert compare(a, b)[&quot;contraction_rate&quot;] == pytest.approx(0.3)
+
+
+def test_verdict_passes_when_profile_is_closer_on_most_metrics():
+    profile = {&quot;m1&quot;: 0.1, &quot;m2&quot;: 0.1, &quot;m3&quot;: 0.5}
+    control = {&quot;m1&quot;: 0.9, &quot;m2&quot;: 0.9, &quot;m3&quot;: 0.1}
+    result = verdict(profile, control)
+    assert result[&quot;metrics_compared&quot;] == 3
+    assert result[&quot;profile_closer&quot;] == 2
+    assert result[&quot;pass&quot;] is False  # 0.67 share, below the 0.7 bar
+
+
+def test_verdict_fails_when_control_wins():
+    result = verdict({&quot;m1&quot;: 0.9}, {&quot;m1&quot;: 0.1})
+    assert result[&quot;pass&quot;] is False
+</code></pre>
+<p>Add <code>import pytest</code> to the test file.</p>
+<ul>
+<li>[ ] <strong>Step 2: Run to verify failure</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_eval.py -v</code>
+Expected: FAIL — <code>ModuleNotFoundError: No module named 'eval_holdout'</code></p>
+<ul>
+<li>[ ] <strong>Step 3: Implement the eval harness</strong></li>
+</ul>
+<pre><code class="language-python"># scripts/eval_holdout.py
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from fingerprint import aggregate  # noqa: E402
+
+PASS_THRESHOLD = 0.7
+
+
+def flatten(node: dict, prefix: str = &quot;&quot;) -&gt; dict:
+    &quot;&quot;&quot;Flatten a metric block to scalar leaves. Lists are skipped as unorderable.&quot;&quot;&quot;
+    out: dict[str, float] = {}
+    for key, value in node.items():
+        path = f&quot;{prefix}{key}&quot;
+        if isinstance(value, dict):
+            out.update(flatten(value, f&quot;{path}.&quot;))
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[path] = float(value)
+    return out
+
+
+def compare(a: dict, b: dict) -&gt; dict:
+    flat_a, flat_b = flatten(a), flatten(b)
+    return {
+        key: abs(flat_a[key] - flat_b[key])
+        for key in flat_a.keys() &amp; flat_b.keys()
+    }
+
+
+def verdict(profile_deltas: dict, control_deltas: dict) -&gt; dict:
+    shared = profile_deltas.keys() &amp; control_deltas.keys()
+    closer = sum(1 for k in shared if profile_deltas[k] &lt; control_deltas[k])
+    share = closer / len(shared) if shared else 0.0
+    return {
+        &quot;metrics_compared&quot;: len(shared),
+        &quot;profile_closer&quot;: closer,
+        &quot;share&quot;: round(share, 3),
+        &quot;pass&quot;: share &gt;= PASS_THRESHOLD,
+    }
+
+
+def main() -&gt; int:
+    ap = argparse.ArgumentParser(
+        description=&quot;Compare profile-guided drafts against held-out originals.&quot;
+    )
+    ap.add_argument(&quot;--holdout&quot;, required=True, help=&quot;JSON list of held-out messages&quot;)
+    ap.add_argument(&quot;--profile-drafts&quot;, required=True)
+    ap.add_argument(&quot;--control-drafts&quot;, required=True)
+    ap.add_argument(&quot;--baseline&quot;, required=True)
+    args = ap.parse_args()
+
+    baseline = json.loads(Path(args.baseline).read_text(encoding=&quot;utf-8&quot;))
+    load = lambda p: json.loads(Path(p).read_text(encoding=&quot;utf-8&quot;))  # noqa: E731
+
+    truth = aggregate(load(args.holdout), baseline)
+    profile_deltas = compare(truth, aggregate(load(args.profile_drafts), baseline))
+    control_deltas = compare(truth, aggregate(load(args.control_drafts), baseline))
+    result = verdict(profile_deltas, control_deltas)
+
+    print(json.dumps(result, indent=2))
+    worst = sorted(profile_deltas.items(), key=lambda kv: -kv[1])[:5]
+    print(&quot;\nLargest remaining gaps:&quot;)
+    for metric, delta in worst:
+        print(f&quot;  {metric}: {delta:.3f}&quot;)
+    return 0 if result[&quot;pass&quot;] else 1
+
+
+if __name__ == &quot;__main__&quot;:
+    raise SystemExit(main())
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: Run to verify tests pass</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_eval.py -v</code>
+Expected: 4 passed.</p>
+<ul>
+<li>[ ] <strong>Step 5: Document the eval procedure in <code>README.md</code></strong></li>
+</ul>
+<p>The README must cover, in this order: what the plugin does, install commands, the
+three ingestion tiers, a privacy section, the eval procedure, and development setup.</p>
+<p>Privacy section, stated plainly:</p>
+<blockquote>
+<p>Your generated profile contains excerpts of your real email, redacted but not
+anonymized. It lives in <code>~/.claude/wam/</code>, outside any repository. Do not commit or
+share it. The raw corpus cache is deleted after each analysis run unless you pass
+<code>--keep-cache</code>.</p>
+</blockquote>
+<p>Eval procedure:</p>
+<blockquote>
+<ol>
+<li>Run analyze mode with <code>--keep-cache</code>.</li>
+<li>Move 5 messages out of <code>corpus.json</code> into <code>holdout.json</code>; re-run
+<code>fingerprint.py</code> on the remainder and regenerate the profile.</li>
+<li>For each held-out message, ask <code>/wam</code> to draft from its subject plus a one-line
+intent, without showing it the original. Collect drafts into <code>drafts.json</code>
+using the corpus message shape.</li>
+<li>Repeat with a fresh session and no profile loaded to build <code>control.json</code>.</li>
+<li>Run <code>eval_holdout.py</code>. It exits 0 when the profile-guided drafts are closer to
+the originals than the control on at least 70% of metrics.</li>
+</ol>
+</blockquote>
+<ul>
+<li>[ ] <strong>Step 6: Run the whole suite one final time</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/ -v</code>
+Expected: all pass, no skips.</p>
+<ul>
+<li>[ ] <strong>Step 7: Commit</strong></li>
+</ul>
+<pre><code class="language-bash">git add scripts/eval_holdout.py tests/test_eval.py README.md
+git commit -m &quot;feat: holdout eval harness and README&quot;
+</code></pre>
+<hr />
+<h2>Self-Review Notes</h2>
+<p><strong>Spec coverage.</strong> Every spec section maps to a task: acquisition tiers → Task 6 Step 1;
+cleaning → Task 2; the full metric list → Tasks 3–4; register clustering and the
+8-message floor → Task 4; exemplar selection → Task 4; redaction → Task 5; profile
+format → Task 6 Step 5; write mode → Task 7; synthetic fixtures → Task 1; unit tests →
+Tasks 2, 3, 5; holdout eval → Task 8; error-handling table → Task 4 Step 9 (corpus
+floor), Task 4 Step 9 (<code>english_metrics_valid</code>, single register via
+<code>suppressed_registers</code>), Task 2 Step 13 (corrupt mbox skipping), Task 6 Step 1 (tier
+fallthrough), Task 7 Step 2 (missing profile); privacy → Task 1 <code>.gitignore</code>, Task 6
+Step 6 cache deletion, Task 8 README.</p>
+<p><strong>Known deviation from the spec.</strong> The spec described a model pass for name redaction
+&quot;catching what the regexes miss.&quot; That is not a script — it became Task 6 Step 4, a
+mandatory verification step in the skill. Calling it out because a reader comparing
+spec to plan would otherwise look for a missing function.</p>
+<p><strong>Type consistency.</strong> <code>aggregate()</code> is defined in Task 4 and reused by Task 8's eval,
+same signature. The message dict schema from Task 2 flows unchanged through Tasks 3–5.
+<code>ASK</code> and <code>paragraphs()</code> are defined in Task 3 and used by <code>select_exemplars()</code> in
+Task 4 — same module, so no import needed.</p>
+
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral" });
+</script>
+</body>
+</html>
