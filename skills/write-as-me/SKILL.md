@@ -222,9 +222,13 @@ audience** delta row and that register's own **Examples** entry as the primary
 reference. Where a register has no meaningful delta ("matches baseline"), the Core
 directives numbers apply directly. Match:
 
-- length: that register's median word count, not the overall baseline median
+- length: that register's median word count, not the overall baseline median — trim
+  phrasing before trimming facts; a date, name, or number the recipient needs is never
+  the thing to cut
 - opener: that register's pattern and rate, not the baseline opener
-- ask placement: early/mid/late per that register's median position
+- ask placement: early/mid/late per that register's median position, when the content
+  actually contains a request — a status update or FYI has none to place, and nothing
+  in Step 4 should manufacture one to give this dimension something to measure
 - signoff: that register's closing line and name form
 - punctuation tics: that register's rate for each tic named in the profile
 - paragraph count and structure, matching the shape of the register's Example
@@ -242,11 +246,18 @@ AI-written; the profile's **Never do this** list exists because absent traits ar
 what make AI email recognizable as AI email. Work through every item below against
 the draft, in order, for the register you drafted in. Do not replace this with a
 general "review for quality" pass, and do not skip an item because the draft "feels
-right" — feel is exactly what this list is here to override.
+right" — feel is exactly what this list is here to override. Two items below (1 and 4)
+name an explicit not-applicable case; that is different from skipping an item because
+it feels right, and it only applies where stated — never extend it to an item that
+doesn't name one.
 
 1. **Length.** Count the words. Compare to *this register's* median (By audience),
    not the overall baseline. Over ~1.8x that median is off-voice — cut content, don't
-   compress by deleting articles or contractions to hit a number.
+   compress by deleting articles or contractions to hit a number. Cut phrasing,
+   hedging, or scene-setting first; never cut a fact the recipient actually needs — a
+   date, a number, a name. If the necessary content genuinely doesn't fit under the
+   ceiling, running a little long is the better failure than an email that's missing
+   what it was supposed to say.
 2. **Never-do-this list, one line at a time.** Open the profile's Never do this
    section and check the draft against each line individually, the same way exemplar
    redaction is checked one exemplar at a time — not as a single skim over the whole
@@ -257,8 +268,14 @@ right" — feel is exactly what this list is here to override.
    register's rate is well under 100%, the profile's own variation is license — don't
    force the majority pattern onto every draft — but never invent an opener pattern
    that isn't attested in the profile at all.
-4. **Ask placement.** Is the ask at roughly this register's median position (open /
-   middle / held-back), not wherever felt natural while writing?
+4. **Ask placement.** If the draft makes an actual request, is it at roughly this
+   register's median position (open / middle / held-back), not wherever felt natural
+   while writing? **If the content has no request in it at all — a status update, an
+   FYI, a plain acknowledgment — this check does not apply.** Do not invent a
+   question, a request, or a call-to-action just to give this item something to
+   measure. Manufacturing an ask changes what the email actually asks the recipient
+   to do, and the user might send it as written — that is a worse failure than any
+   placement miss this check could catch.
 5. **Signoff.** Does the closing line and name form match this register exactly —
    full name after a closing word, vs. bare first name after an em dash, vs. no
    signoff at all? A signoff form the profile marks as never occurring (e.g.
