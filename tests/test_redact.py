@@ -102,3 +102,19 @@ def test_no_raw_emails_survive_full_pipeline(tmp_path):
     assert not re.search(phone_re, text), "raw phone number survived"
     assert not re.search(currency_re, text), "raw currency amount survived"
     assert "Dana" in text, "profile owner's name should be preserved"
+
+
+def test_redact_cli_creates_missing_output_directory(tmp_path):
+    """Finding 1: a user without a prior ~/.claude/wam/cache/ must not hit an
+    uncaught FileNotFoundError from Path.write_text on the first run."""
+    root = Path(__file__).parent.parent
+    src = tmp_path / "exemplars.json"
+    src.write_text(json.dumps({"internal": []}), encoding="utf-8")
+    out = tmp_path / "does" / "not" / "exist" / "exemplars.redacted.json"
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "redact.py"),
+         "--in", str(src), "--out", str(out), "--keep-name", "Dana"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert out.exists()

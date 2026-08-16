@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import mailbox
 import re
@@ -94,6 +95,31 @@ def _looks_like_label(line: str) -> bool:
 AUTO_HEADERS = ("auto-submitted", "x-autoreply", "x-autorespond")
 TAG_RE = re.compile(r"<[^>]+>")
 
+# Quoted-reply containers must be dropped *before* TAG_RE strips the markup,
+# otherwise the correspondent's quoted text has no HTML tags left to signal
+# "this is a quote" and survives as if it were the user's own prose (the tag
+# strip leaves no literal ">" for strip_quoted's markers to find).
+#
+# <blockquote> is matched greedily (`.*` not `.*?`) on purpose: real reply
+# chains nest <blockquote> inside <blockquote> (replying to a reply), and a
+# lazy match would stop at the *first* closing tag — the innermost one —
+# leaking the outer, older quoted text back into the body. Greedy matching to
+# the *last* </blockquote> in the message correctly swallows the whole nested
+# chain. The trade-off is two independent, non-nested blockquotes with real
+# authored text between them would also get collapsed together; for a corpus
+# whose purpose is "never let a correspondent's words pass as the user's
+# voice," over-stripping a rare structure is the safer failure than under-
+# stripping the common one.
+BLOCKQUOTE_RE = re.compile(r"<blockquote\b[^>]*>.*</blockquote>", re.IGNORECASE | re.DOTALL)
+# Some clients (and forwarded mail) mark the quote container with
+# class="gmail_quote" on a tag other than <blockquote> (typically a <div>).
+# Matched non-greedily against its own tag name via backreference, since
+# these wrappers are not known to nest the way reply-chain blockquotes do.
+GMAIL_QUOTE_RE = re.compile(
+    r"<(\w+)\b[^>]*\bclass=[\"'][^\"']*gmail_quote[^\"']*[\"'][^>]*>.*?</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def is_auto_reply(msg: EmailMessage) -> bool:
     for header in AUTO_HEADERS:
@@ -110,7 +136,11 @@ def extract_body(msg: EmailMessage) -> str:
         return part.get_content()
     part = msg.get_body(preferencelist=("html",))
     if part is not None:
-        return TAG_RE.sub(" ", part.get_content())
+        content = part.get_content()
+        content = BLOCKQUOTE_RE.sub(" ", content)
+        content = GMAIL_QUOTE_RE.sub(" ", content)
+        content = TAG_RE.sub(" ", content)
+        return html.unescape(content)
     return ""
 
 
@@ -166,7 +196,14 @@ def _shingles(text: str, size: int = 5) -> set[str]:
     return {" ".join(words[i : i + size]) for i in range(len(words) - size + 1)}
 
 
-def dedupe(messages: list[dict], threshold: float = 0.85) -> list[dict]:
+# 0.70, not 0.85: measured template pairs (same boilerplate, only name/company
+# swapped) score 0.77 at 5-word shingles; 0.85 never fires on them, which
+# defeats the reason dedupe exists (collapsing a template into one occurrence
+# so it can't be learned as "the voice"). The nearest genuinely-distinct pair
+# in this corpus scores 0.051, so 0.70 leaves a wide safe basin between real
+# duplicates and real variety — do not retune this without re-measuring both
+# ends of that basin.
+def dedupe(messages: list[dict], threshold: float = 0.70) -> list[dict]:
     kept: list[tuple[dict, set[str]]] = []
     for msg in messages:
         shingles = _shingles(msg["body"])
@@ -259,6 +296,7 @@ def main() -> int:
             "terse": len(terse),
         },
     }
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(
         f"{len(raw)} parsed -> {len(main_corpus)} usable, "

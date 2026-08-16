@@ -78,6 +78,7 @@ def main() -> int:
 
     data = json.loads(Path(args.src).read_text(encoding="utf-8"))
     result = redact_exemplars(data, set(args.keep_name))
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(f"redacted -> {args.out}")
     return 0

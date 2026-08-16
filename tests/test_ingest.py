@@ -126,9 +126,119 @@ def test_cli_end_to_end(tmp_path):
     assert data["stats"]["kept"] >= 12
     assert data["stats"]["terse"] == 4
     # dedupe() must actually fire: outreach_001/outreach_002 are a genuine
-    # templated pair (Jaccard > 0.85), so exactly one of them is collapsed.
+    # templated pair (Jaccard ~0.857 at 5-word shingles, well above the 0.70
+    # threshold), so exactly one of them is collapsed. The nearest genuinely
+    # distinct pair in this corpus scores ~0.051, far below threshold.
     assert data["stats"]["deduped"] == normalized_count - 1
     assert data["stats"]["kept"] + data["stats"]["terse"] == data["stats"]["deduped"]
     for msg in data["messages"]:
         assert "wrote:" not in msg["body"]
         assert "Sent from my" not in msg["body"]
+
+
+# --- Finding 1: first run must not crash with FileNotFoundError -----------
+
+
+def test_cli_creates_missing_output_directory(tmp_path):
+    """A user with no prior ~/.claude/wam/cache/ must not hit an uncaught
+    FileNotFoundError from Path.write_text on the very first run."""
+    out = tmp_path / "does" / "not" / "exist" / "corpus.json"
+    root = Path(__file__).parent.parent
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "ingest.py"),
+         "--eml-dir", str(FIXTURES), "--user", USER, "--out", str(out)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert out.exists()
+
+
+# --- Finding 5: dedupe threshold lowered to 0.70, 5-word shingles kept ----
+
+
+def test_dedupe_default_threshold_catches_070_pair_085_would_miss():
+    """A template pair differing in exactly one of ten words scores 5/7 ~=
+    0.714 Jaccard at 5-word shingles: below the old 0.85 default (the two
+    messages would have survived as separate entries) and above the new 0.70
+    default (they must collapse to one). This is the exact class of genuine
+    templated outreach dedupe exists to catch."""
+    a = {"id": "a", "body": "alpha beta gamma delta epsilon zeta eta theta iota kappa"}
+    b = {"id": "b", "body": "alpha beta gamma delta epsilon zeta eta theta iota lambda"}
+
+    assert [m["id"] for m in dedupe([a, b])] == ["a"]
+    # Confirm the old default really would have missed this pair, so the
+    # test is actually exercising the threshold change and not something else.
+    assert len(dedupe([a, b], threshold=0.85)) == 2
+
+
+def test_dedupe_still_spares_genuinely_distinct_messages():
+    """The 0.70 default must not start catching real variety. The highest-
+    scoring genuinely-distinct pair measured in the synthetic corpus is
+    ~0.051 Jaccard, far below threshold."""
+    a = {"id": "a", "body": "Completely unrelated message about lunch plans on Friday."}
+    b = {"id": "b", "body": "Quarterly budget review moved to next Thursday afternoon."}
+    assert len(dedupe([a, b])) == 2
+
+
+# --- Finding 3: HTML blockquote / gmail_quote replies must be stripped ----
+
+
+def _html_msg(html_body: str, subject: str = "Re: Thursday", msg_id: str = "html-1") -> bytes:
+    return (
+        b"From: dana@northwind-labs.com\r\n"
+        b"To: priya@harborline.com\r\n"
+        b"Subject: " + subject.encode() + b"\r\n"
+        b"Date: Mon, 21 Apr 2025 09:00:11 -0400\r\n"
+        b"Message-ID: <" + msg_id.encode() + b"@northwind-labs.com>\r\n"
+        b'Content-Type: text/html; charset="utf-8"\r\n'
+        b"\r\n" + html_body.encode("utf-8")
+    )
+
+
+def test_html_blockquote_reply_is_stripped_and_entities_unescaped():
+    raw = _html_msg(
+        "<div>Sounds good &mdash; let's proceed with Thursday.</div>\n"
+        '<blockquote class="gmail_quote">\n'
+        "<div>On Mon, Apr 21, 2025 at 8:00 AM Priya Shah "
+        "&lt;priya@harborline.com&gt; wrote:</div>\n"
+        "<div>Can we push the call to Thursday? Let me know soon.</div>\n"
+        "</blockquote>\n"
+        "<div>Dana Reyes</div>\n"
+        "<div>northwind-labs.com</div>\n"
+    )
+    msg = BytesParser(policy=policy.default).parsebytes(raw)
+    rec = normalize(msg, USER)
+    assert rec is not None
+    body = rec["body"]
+    # The correspondent's quoted message and identity must not survive.
+    assert "Priya" not in body
+    assert "push the call" not in body
+    # The entity must be unescaped, not left as literal markup.
+    assert "&mdash;" not in body
+    assert "—" in body  # em dash
+    # The trailing signature block is removed by the existing pipeline.
+    assert "Dana Reyes" not in body
+    assert body == "Sounds good — let's proceed with Thursday."
+
+
+def test_html_nested_blockquote_chain_is_fully_stripped():
+    """A reply-to-a-reply nests <blockquote> inside <blockquote>. A lazy
+    (non-greedy) match would stop at the innermost closing tag and leak the
+    outer, older quoted text back into the body."""
+    raw = _html_msg(
+        "<div>Works for me.</div>\n"
+        '<blockquote class="gmail_quote">\n'
+        "<div>Marcus wrote: can you also loop in Priya on this?</div>\n"
+        '<blockquote class="gmail_quote">\n'
+        "<div>Priya wrote: original ask about the fulfillment numbers.</div>\n"
+        "</blockquote>\n"
+        "</blockquote>\n"
+    )
+    msg = BytesParser(policy=policy.default).parsebytes(raw)
+    rec = normalize(msg, USER)
+    assert rec is not None
+    body = rec["body"]
+    assert "Marcus" not in body
+    assert "Priya" not in body
+    assert "fulfillment numbers" not in body
+    assert body == "Works for me."

@@ -75,17 +75,26 @@ analysis run unless you pass `--keep-cache`.
 
 Concretely: `ingest.py` and `fingerprint.py` write intermediate files
 (`raw.json`, `corpus.json`, `fingerprint.json`, `exemplars.json`) to
-`~/.claude/wam/cache/`, and the skill reads only the small,
-already-redacted `fingerprint.json` and `exemplars.redacted.json` into
-model context — it is instructed never to read the raw corpus files. At
+`~/.claude/wam/cache/`, and the skill reads only the small
+`fingerprint.json` and the already-redacted `exemplars.redacted.json` into
+model context — it is instructed never to read the raw corpus files.
+`redact.py` never processes `fingerprint.json`: only `exemplars.json` goes
+through it. `fingerprint.json`'s lexicon is a top-N ranked list of the
+user's own distinctive words and phrases, and that ranking method actively
+favors proper nouns (a name absent from the baseline scores higher than
+common English), so it can and does surface real company or project names.
+The skill's Step 4 treats checking the lexicon before quoting from it as
+mandatory, with the same per-entry rigor it applies to exemplars — that
+human check is the only redaction the lexicon ever gets. At
 the end of a run that cache directory is deleted unless you explicitly ask
 to keep it. The one durable artifact is `~/.claude/wam/default.md`, the
 profile itself, which by design contains a handful of real (redacted)
 example emails so both you and the model can see what "in your voice"
 concretely means. Nothing under `~/.claude/wam/` is ever written into a
 project repository, and this repo's `.gitignore` also blocks accidental
-commits of raw mail exports (`*.mbox`, `*.eml`, `emails/`, `corpus.json`,
-`raw.json`).
+commits of raw mail exports and eval artifacts (`*.mbox`, `*.eml`,
+`emails/`, `corpus.json`, `raw.json`, `holdout.json`, `drafts.json`,
+`control.json`).
 
 ## Evaluating whether it actually sounds like you
 
@@ -99,21 +108,29 @@ the two (metrics where both tied — commonly a punctuation mark neither side
 used — are reported separately and don't count toward or against the pass
 bar, since a tie is not evidence either way).
 
+This procedure handles real, unredacted email — the same five held-out messages,
+your drafts of them, and the control drafts. None of it belongs in a repository
+working directory. Do all of it under `~/.claude/wam/`, outside any repo, the same
+place the rest of this plugin's output lives; `.gitignore` in this repo also blocks
+`holdout.json`, `drafts.json`, and `control.json` as a backstop in case you deviate
+from that.
+
 Procedure:
 
 1. Run analyze mode with `--keep-cache`.
-2. Move 5 messages out of `corpus.json` into `holdout.json`, **all drawn from
-   a single register** (e.g. all 5 client, or all 5 internal) — length norms
-   differ by register (a 40-word client email and a 90-word cold-outreach
-   email are both correct in their own register), so mixing registers in
-   one holdout averages them into a blended "truth" that penalizes a
-   register-correct draft for not matching a length no single register
+2. Move 5 messages out of `~/.claude/wam/cache/corpus.json` into
+   `~/.claude/wam/holdout.json`, **all drawn from a single register** (e.g. all 5
+   client, or all 5 internal) — length norms differ by register (a 40-word client
+   email and a 90-word cold-outreach email are both correct in their own register),
+   so mixing registers in one holdout averages them into a blended "truth" that
+   penalizes a register-correct draft for not matching a length no single register
    actually has. Re-run `fingerprint.py` on the remainder and regenerate the
    profile.
 3. For each held-out message, ask `/wam` to draft from its subject plus a
    one-line intent, without showing it the original. Collect drafts into
-   `drafts.json` using the corpus message shape.
-4. Repeat with a fresh session and no profile loaded to build `control.json`.
+   `~/.claude/wam/drafts.json` using the corpus message shape.
+4. Repeat with a fresh session and no profile loaded to build
+   `~/.claude/wam/control.json`.
 5. Run `eval_holdout.py`. It exits 0 when the profile-guided drafts are
    closer to the originals than the control on at least 70% of the metrics
    where the two differed (tied metrics — e.g. both at 0 semicolons — are
@@ -123,9 +140,9 @@ Procedure:
 
 ```bash
 python scripts/eval_holdout.py \
-  --holdout holdout.json \
-  --profile-drafts drafts.json \
-  --control-drafts control.json \
+  --holdout ~/.claude/wam/holdout.json \
+  --profile-drafts ~/.claude/wam/drafts.json \
+  --control-drafts ~/.claude/wam/control.json \
   --baseline fixtures/baseline_ngrams.json
 ```
 

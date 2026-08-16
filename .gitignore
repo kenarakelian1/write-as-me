@@ -11,6 +11,9 @@ emails/
 .wam/
 corpus.json
 raw.json
+holdout.json
+drafts.json
+control.json
 
 # Orchestration scratch
 .superpowers/

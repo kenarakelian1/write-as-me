@@ -77,7 +77,11 @@ Read `fingerprint.json` and `exemplars.redacted.json`. **Never read `corpus.json
 This is the last line of defense before real email excerpts are written to disk. A
 skim is not enough — regex misses are rare but real (company names, project code
 names, and account numbers are not shaped like the emails/URLs/amounts/phones the
-regexes catch). Go exemplar by exemplar, not corpus by corpus:
+regexes catch). `redact.py` only ever processes `exemplars.json` — it never touches
+`fingerprint.json`, and nothing scrubs the lexicon. This step must therefore cover
+*both* the exemplars and the lexicon; do not treat it as an exemplars-only pass.
+
+**Part A — Exemplars.** Go exemplar by exemplar, not corpus by corpus:
 
 For each exemplar in `exemplars.redacted.json`, in order:
 1. Read the full text of that one exemplar.
@@ -89,9 +93,34 @@ For each exemplar in `exemplars.redacted.json`, in order:
    (client): checked, no leaks" or "Exemplar 7/20 (cold_outreach): checked, redacted
    company name 'Ashford'."
 
-Do not move to Step 5 until every exemplar has its own confirmation line. Never
+Do not move to Part B until every exemplar has its own confirmation line. Never
 present an exemplar in the final profile that you have not personally checked this
 way.
+
+**Part B — Lexicon.** `baseline.lexicon` in `fingerprint.json` is never redacted by
+any script — you are the only check it gets. Its ranking method actively selects for
+proper nouns: any phrase absent from the baseline gets scored against a smoothing
+floor, so a client's company name or a project code name routinely outranks ordinary
+words like "the." Step 5 instructs you to quote the top lexicon entries verbatim into
+the durable profile, so a name that leaks here is not a transient context leak — it
+is written to disk in `default.md` and kept indefinitely.
+
+Apply the same per-entry rigor as Part A, entry by entry, not the list as a whole:
+
+For each of the top entries you are considering quoting from `baseline.lexicon` (and
+from each register's own lexicon, if you pull register-specific phrases), in order:
+1. Read the phrase on its own.
+2. Check it against each of: person names, company/organization names, project code
+   names, account or reference numbers.
+3. If it names a specific person, company, or project rather than a reached-for
+   turn of phrase, drop that entry — do not quote it into the profile, and do not
+   substitute a placeholder in its place; just move to the next-ranked entry.
+4. State explicitly, per entry considered, that it was checked — e.g. "Lexicon
+   entry 'worth a look': checked, no leaks" or "Lexicon entry 'ashford renewal':
+   checked, dropped — names a client project."
+
+Do not move to Step 5 until every lexicon entry you plan to quote has its own
+confirmation line.
 
 ### Step 5 — Write the profile
 

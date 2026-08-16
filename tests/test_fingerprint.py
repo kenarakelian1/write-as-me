@@ -167,6 +167,32 @@ def test_fingerprint_cli_on_synthetic_corpus(tmp_path):
     assert exemplars["internal"]
 
 
+def test_fingerprint_cli_creates_missing_output_directories(tmp_path):
+    """Finding 1: a user without a prior ~/.claude/wam/cache/ must not hit an
+    uncaught FileNotFoundError from Path.write_text on the first run — for
+    both --out and --exemplars, which are written to separately."""
+    root = Path(__file__).parent.parent
+    corpus = tmp_path / "corpus.json"
+    subprocess.run(
+        [sys.executable, str(root / "scripts" / "ingest.py"),
+         "--eml-dir", str(root / "fixtures" / "synthetic"),
+         "--user", "dana@northwind-labs.com", "--out", str(corpus)],
+        check=True, capture_output=True,
+    )
+    fp = tmp_path / "does" / "not" / "exist" / "fingerprint.json"
+    ex = tmp_path / "also" / "missing" / "exemplars.json"
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "fingerprint.py"),
+         "--corpus", str(corpus),
+         "--baseline", str(root / "fixtures" / "baseline_ngrams.json"),
+         "--out", str(fp), "--exemplars", str(ex)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert fp.exists()
+    assert ex.exists()
+
+
 def test_sentences_splits_on_terminators():
     assert sentences("One. Two! Three? Four") == ["One.", "Two!", "Three?", "Four"]
 

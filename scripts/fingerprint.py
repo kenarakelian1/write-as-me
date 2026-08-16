@@ -391,11 +391,13 @@ def main() -> int:
         "suppressed_registers": suppressed,
         "english_metrics_valid": _english_likely(messages),
     }
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(fingerprint, indent=2), encoding="utf-8")
 
     exemplars = {name: select_exemplars(group) for name, group in buckets.items()}
     if corpus.get("terse_ack"):
         exemplars["terse_ack"] = select_exemplars(corpus["terse_ack"], count=3)
+    Path(args.exemplars).parent.mkdir(parents=True, exist_ok=True)
     Path(args.exemplars).write_text(json.dumps(exemplars, indent=2), encoding="utf-8")
 
     print(
