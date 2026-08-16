@@ -100,3 +100,36 @@ def test_lexicon_surfaces_distinctive_phrases():
     phrases = [item["phrase"] for item in lexicon(msgs, baseline, top_n=4)]
     assert "worth" in phrases
     assert "the" not in phrases
+
+
+def test_lexicon_bigrams_do_not_cross_message_boundaries():
+    """A bigram must never be formed from the last word of one message and
+    the first word of the next, even when it recurs across many messages —
+    e.g. a signoff ("...Dana Reyes") directly followed by the next email's
+    greeting ("Hi Priya...") must never surface "reyes hi" as a phrase."""
+    baseline = {"unigrams": {}, "bigrams": {}}
+    msgs = []
+    for _ in range(3):
+        msgs.append({"body": "Thanks, best reyes"})
+        msgs.append({"body": "Hi priya, following up"})
+    phrases = [item["phrase"] for item in lexicon(msgs, baseline, top_n=50)]
+    assert "reyes hi" not in phrases
+
+
+def test_ask_placement_paragraph_split_avoids_greeting_fusion():
+    """sentences() has no terminator to split on after a bare greeting line,
+    so splitting the raw body directly fuses "Hi Priya," into sentence[0]
+    with the ask that immediately follows it, pinning the result at 0.0
+    regardless of where the ask actually sits. Splitting into paragraphs
+    first (like shape_metrics() does) keeps the greeting as its own unit,
+    so a two-unit email (greeting, then ask) correctly reports 0.5 rather
+    than collapsing to a single fused unit at 0.0."""
+    text = "Hi Priya,\n\nCan you confirm by Thursday?"
+    assert ask_placement(text) == 0.5
+
+
+def test_ask_placement_detects_bare_imperative():
+    """A directive with no question mark and no politeness marker ("Need the
+    client deck by noon", "Move the travel line...") is still an ask."""
+    assert ask_placement("Need the client deck by noon.") == 0.0
+    assert ask_placement("Move the travel line into professional services.") == 0.0

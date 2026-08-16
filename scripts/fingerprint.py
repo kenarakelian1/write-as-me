@@ -80,7 +80,7 @@ ASK = re.compile(
     re.IGNORECASE,
 )
 IMPERATIVE_START = re.compile(
-    r"^(send|check|confirm|review|let|call|ping|see|take|hold|drop|add|move|use)\b",
+    r"^(send|check|confirm|review|let|call|ping|see|take|hold|drop|add|move|use|need)\b",
     re.IGNORECASE,
 )
 SIGNOFFS = [
@@ -161,9 +161,16 @@ def stance(text: str) -> dict:
 
 
 def ask_placement(text: str) -> float | None:
-    sents = sentences(text)
+    # Paragraph-first, same as shape_metrics(): a bare greeting line ("Hi
+    # Priya,") has no terminal punctuation, so splitting sentences() directly
+    # on the raw body fuses the greeting into sentence[0] and pins every ask
+    # near the front. Splitting into paragraphs first keeps the greeting as
+    # its own unit.
+    sents = []
+    for para in paragraphs(text):
+        sents.extend(sentences(para))
     for index, sent in enumerate(sents):
-        if ASK.search(sent):
+        if ASK.search(sent) or IMPERATIVE_START.match(sent):
             return round(index / len(sents), 3)
     return None
 
@@ -173,12 +180,16 @@ SMOOTHING = 1e-7
 
 def lexicon(messages: list[dict], baseline: dict, top_n: int = 15) -> list[dict]:
     """Rank the user's n-grams by log-odds against a common-English baseline."""
-    words: list[str] = []
+    # Bigrams are built per message and summed, not over one flat word list
+    # spanning every message — otherwise one email's signoff abuts the next
+    # email's greeting (e.g. "...Dana Reyes" + "Hi Priya..." -> "reyes hi"),
+    # producing a bigram that never occurred in any actual sentence.
+    uni: Counter = Counter()
+    bi: Counter = Counter()
     for msg in messages:
-        words.extend(w.lower() for w in WORD.findall(msg["body"]))
-
-    uni = Counter(words)
-    bi = Counter(f"{a} {b}" for a, b in zip(words, words[1:]))
+        msg_words = [w.lower() for w in WORD.findall(msg["body"])]
+        uni.update(msg_words)
+        bi.update(f"{a} {b}" for a, b in zip(msg_words, msg_words[1:]))
     uni_total = sum(uni.values()) or 1
     bi_total = sum(bi.values()) or 1
 
