@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>write-as-me — Design Spec</title>
+<style>
+:root {
+  --ink: #1a1a1a; --muted: #5c5c5c; --rule: #e0ddd6;
+  --bg: #fdfcfa; --accent: #7a3e2f; --code-bg: #f4f2ed;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #e8e6e1; --muted: #a8a49c; --rule: #35322c;
+    --bg: #16151300; --bg: #161513; --accent: #d99a7f; --code-bg: #211f1c;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 4rem 1.5rem 8rem;
+  background: var(--bg); color: var(--ink);
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-size: 18px; line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+main { max-width: 44rem; margin: 0 auto; }
+h1, h2, h3, h4 {
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  line-height: 1.25; font-weight: 600; margin: 2.5em 0 0.6em;
+}
+h1 { font-size: 2.1rem; margin-top: 0; letter-spacing: -0.02em; }
+h2 { font-size: 1.4rem; padding-bottom: 0.3em; border-bottom: 1px solid var(--rule); }
+h3 { font-size: 1.12rem; }
+h4 { font-size: 1rem; color: var(--muted); }
+p, ul, ol { margin: 0 0 1.15em; }
+li { margin-bottom: 0.35em; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+hr { border: 0; border-top: 1px solid var(--rule); margin: 3em 0; }
+blockquote {
+  margin: 0 0 1.15em; padding-left: 1.2em;
+  border-left: 3px solid var(--rule); color: var(--muted);
+}
+code {
+  font-family: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  font-size: 0.85em; background: var(--code-bg);
+  padding: 0.15em 0.4em; border-radius: 3px;
+}
+pre {
+  background: var(--code-bg); padding: 1.1em 1.3em; border-radius: 6px;
+  overflow-x: auto; font-size: 0.85rem; line-height: 1.5;
+  border: 1px solid var(--rule);
+}
+pre code { background: none; padding: 0; font-size: 1em; }
+table {
+  width: 100%; border-collapse: collapse; margin: 0 0 1.5em;
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif; font-size: 0.9rem;
+}
+th, td { text-align: left; padding: 0.55em 0.8em; border-bottom: 1px solid var(--rule); }
+th { font-weight: 600; border-bottom-width: 2px; }
+.mermaid { margin: 2em 0; text-align: center; }
+@media print {
+  body { background: #fff; color: #000; font-size: 11pt; padding: 0; }
+  h2 { page-break-after: avoid; }
+  pre, table, blockquote { page-break-inside: avoid; }
+  a { color: #000; text-decoration: none; }
+}
+</style>
+</head>
+<body>
+<main>
+<h1>write-as-me — Design Spec</h1>
+<p><strong>Date:</strong> 2026-08-16
+<strong>Status:</strong> Approved for planning
+<strong>Repo:</strong> <code>write-as-me</code> (public, standalone)</p>
+<h2>Summary</h2>
+<p>A Claude Code plugin that reads a person's past sent email, derives a personalized
+writing-style guide, and uses that guide to draft new email in their voice.</p>
+<p>Two modes on one command:</p>
+<ul>
+<li><code>/write-as-me</code> (no args) — analyze the corpus, produce a style profile</li>
+<li><code>/write-as-me &lt;what you want to say&gt;</code> — draft an email using the existing profile</li>
+</ul>
+<p><code>/wam</code> is a thin alias for both.</p>
+<p>The guide is written to <code>~/.claude/wam/</code>, outside any repository, so it cannot be
+committed by accident. (The storage directory keeps the short <code>wam</code> name throughout,
+matching the shorthand command; only the skill, plugin, and repo are named
+<code>write-as-me</code>.)</p>
+<h2>Goals</h2>
+<ol>
+<li>Produce guidance specific enough to constrain output. &quot;Friendly but professional&quot;
+is a failure; &quot;median 68 words, ask in the first two sentences, never opens with a
+pleasantry&quot; is a success.</li>
+<li>Work for anyone who installs the plugin, not just the author. No assumption of a
+particular mail provider or connector.</li>
+<li>Never leak the corpus. Real email stays off disk in shareable locations, and
+excerpts are redacted before they reach the profile.</li>
+<li>Be testable in public, without anyone's real mail.</li>
+</ol>
+<h2>Non-goals</h2>
+<ul>
+<li>Sending mail. The skill drafts; the human sends.</li>
+<li>A hosted service, web UI, or persistent index of the user's mailbox.</li>
+<li>Multi-user or team style profiles.</li>
+<li>Languages other than English are supported on a best-effort basis: structural
+metrics (length, paragraphing, openers, punctuation) hold, while English-specific
+metrics (contraction rate, hedge markers) degrade and are suppressed from the
+profile when the corpus is detected as predominantly non-English.</li>
+</ul>
+<h2>Users and installation</h2>
+<p>Distributed as a Claude Code plugin:</p>
+<pre><code>/plugin marketplace add kenarakelian1/write-as-me
+/plugin install write-as-me
+</code></pre>
+<p>The repo also works as a plain clone into <code>~/.claude/skills/</code>, but the plugin path is
+the documented one, since it gives versioning and clean updates.</p>
+<p>Runtime requirement: Python 3.9+ on PATH. Standard library only — no pip install, no
+virtualenv, no lockfile. This is a deliberate constraint: a public plugin that
+requires dependency installation loses most of its would-be users at the first step.</p>
+<h2>Architecture</h2>
+<p>Deterministic work happens in Python; interpretive work happens in the model.</p>
+<pre><code>sources ──▶ ingest.py ──▶ corpus.json ──▶ fingerprint.py ──▶ fingerprint.json
+                                                          └─▶ exemplars.json
+                                                                    │
+                                                              redact.py
+                                                                    │
+                                                                    ▼
+                                              Claude synthesis ──▶ ~/.claude/wam/&lt;profile&gt;.md
+</code></pre>
+<p>The corpus never enters the model's context in bulk. The model sees a compact
+fingerprint (a few KB of JSON) plus a handful of redacted exemplars. This keeps
+analysis affordable on a large mailbox and keeps the counted metrics actually correct,
+rather than eyeballed.</p>
+<h3>Repo layout</h3>
+<pre><code>write-as-me/
+├─ .claude-plugin/
+│  ├─ plugin.json
+│  └─ marketplace.json
+├─ skills/write-as-me/SKILL.md
+├─ commands/wam.md                  # alias → delegates to the skill
+├─ scripts/
+│  ├─ ingest.py
+│  ├─ fingerprint.py
+│  ├─ redact.py
+│  └─ eval_holdout.py
+├─ fixtures/synthetic/              # fake persona, ~40 emails
+├─ tests/
+│  ├─ test_ingest.py
+│  ├─ test_fingerprint.py
+│  └─ test_redact.py
+├─ docs/superpowers/specs/
+├─ .gitignore
+└─ README.md
+</code></pre>
+<h2>Stage 1 — Corpus acquisition</h2>
+<p>Three tiers, probed in order. The skill announces which tier it used.</p>
+<p><strong>Tier 1: Gmail connector.</strong> Search <code>in:sent -in:chats</code> over the last 12 months.
+Target 60–150 messages. Thread context is fetched so each message carries its
+recipients and whether it opened a thread or replied to one. Raw results are written
+to <code>~/.claude/wam/cache/raw.json</code>.</p>
+<p><strong>Tier 2: local export.</strong> Look for <code>.mbox</code> or <code>.eml</code> files in <code>./emails/</code>, then in a
+path the user supplies. Handles Google Takeout, Outlook, and Apple Mail exports.
+Messages are filtered to those whose <code>From:</code> matches the user's address, which the
+skill asks for if it cannot infer it.</p>
+<p><strong>Tier 3: paste.</strong> Prompt for 15–30 sent emails pasted directly. Floor of 12.</p>
+<p>If fewer than 12 usable messages survive cleaning, the skill stops and explains what
+it found rather than generating a profile from too little signal.</p>
+<h2>Stage 2 — Cleaning</h2>
+<p>Most style tools fail here, by learning the quoted text of the person's
+correspondents instead of the person.</p>
+<ul>
+<li>Strip quoted reply blocks: <code>&gt;</code> prefixes, <code>On &lt;date&gt;, &lt;name&gt; wrote:</code>,
+<code>-----Original Message-----</code>, and <code>&lt;blockquote&gt;</code> in HTML parts.</li>
+<li>Strip signature blocks: the <code>-- </code> delimiter, trailing contact blocks matched by a
+phone/address/title heuristic, and mobile footers such as &quot;Sent from my iPhone&quot;.</li>
+<li>Prefer <code>text/plain</code> parts; fall back to HTML with tags stripped.</li>
+<li>Drop auto-replies (<code>Auto-Submitted</code>, <code>X-Autoreply</code>), calendar invites, and
+delivery notifications.</li>
+<li>Route messages under 15 words into a separate <code>terse_ack</code> bucket rather than
+discarding them — brief acknowledgements are a real and distinctive register.</li>
+<li>Deduplicate near-identical messages via normalized shingle overlap above 0.85,
+keeping the earliest. Without this, templated outreach dominates the fingerprint
+and the guide learns the template rather than the voice.</li>
+</ul>
+<h3>Normalized message schema (<code>corpus.json</code>)</h3>
+<pre><code class="language-json">{
+  &quot;id&quot;: &quot;string&quot;,
+  &quot;date&quot;: &quot;ISO-8601&quot;,
+  &quot;to_domains&quot;: [&quot;example.com&quot;],
+  &quot;recipient_count&quot;: 1,
+  &quot;subject&quot;: &quot;string&quot;,
+  &quot;body&quot;: &quot;cleaned plain text&quot;,
+  &quot;is_reply&quot;: true,
+  &quot;word_count&quot;: 87
+}
+</code></pre>
+<h2>Stage 3 — Fingerprint</h2>
+<p>All values computed, none inferred. Emitted per corpus and per register bucket.</p>
+<p><strong>Shape</strong> — median and IQR of words per email, words per sentence, sentences per
+paragraph, paragraphs per email.</p>
+<p><strong>Openers</strong> — frequency table over the first line, normalized into patterns:
+<code>Hi &lt;name&gt;</code>, <code>Hey &lt;name&gt;</code>, <code>&lt;name&gt; —</code>, bare name, no greeting.</p>
+<p><strong>Closers</strong> — frequency table of signoff phrase, plus name form used (full name,
+first name, initial, none).</p>
+<p><strong>Mechanics</strong> — contraction rate (contracted forms over expandable candidates);
+per-100-word rates for em dash, ellipsis, exclamation mark, semicolon, parentheses;
+emoji rate; all-lowercase-sentence rate.</p>
+<p><strong>Stance</strong> — hedge markers (<code>just</code>, <code>I think</code>, <code>maybe</code>, <code>sorry to</code>, <code>a bit</code>) per 100
+words versus imperative-mood sentence rate; question rate; bullet-list usage rate.</p>
+<p><strong>Structure</strong> — subject line length, capitalization style, question-mark rate; and
+<strong>ask placement</strong>, the sentence index of the primary request as a fraction of email
+length. Whether someone leads with the ask or buries it is among the most recognizable
+things about how they write.</p>
+<p><strong>Lexicon</strong> — distinctive 1–3-grams ranked by log-odds against a bundled
+common-English frequency baseline. These are the pet phrases.</p>
+<h2>Stage 4 — Register clustering</h2>
+<p>Messages are bucketed by recipient domain and relationship signal into: <code>internal</code>
+(shared domain with the user), <code>client</code>, <code>cold_outreach</code> (no prior thread from that
+address), <code>vendor</code>, <code>personal</code> (consumer mail domains), and <code>terse_ack</code>.</p>
+<p>Each bucket gets its own fingerprint, reported as a <strong>delta from the overall
+baseline</strong> rather than as a standalone table — this keeps the profile short and makes
+the differences legible. A bucket needs at least 8 messages to earn a profile;
+below that it folds into the baseline and the profile notes the omission.</p>
+<h2>Stage 5 — Exemplar selection</h2>
+<p>Three to five per register, scored on: self-authored ratio after cleaning, proximity
+to that register's median length, presence of a clear ask, and absence of
+heavy domain-specific jargon. Exemplars are stored as full redacted text.</p>
+<p>Exemplars carry more weight than any rule in the profile. Abstract guidance describes
+a voice; a real message demonstrates it, and the model imitates demonstrations far
+more faithfully than descriptions.</p>
+<h2>Stage 6 — Redaction</h2>
+<p>A deterministic regex layer runs first: email addresses, phone numbers, URLs, street
+addresses, and currency amounts. A model pass then catches person and company names
+the regexes miss.</p>
+<p>Rules:</p>
+<ul>
+<li>Replace, never delete. <code>[FIRST]</code>, <code>[COMPANY]</code>, <code>[$AMOUNT]</code>, <code>[URL]</code> preserve
+sentence rhythm and length, which are exactly the properties being modeled.</li>
+<li>The user's own first name is preserved wherever it appears in signoffs. That is
+style, not private data.</li>
+<li>Dates and weekdays are preserved.</li>
+<li>Redaction applies to exemplars and to any quoted snippet in the profile. It does
+not apply to <code>corpus.json</code>, which is treated as sensitive and deleted after the run
+unless <code>--keep-cache</code> is passed.</li>
+</ul>
+<h2>Stage 7 — Profile output</h2>
+<p>Written to <code>~/.claude/wam/&lt;profile&gt;.md</code>, default profile name <code>default</code>.</p>
+<p>Phrased as <strong>directives, not description</strong>. &quot;Keep it under 80 words&quot; is actionable;
+&quot;concise and direct&quot; is not.</p>
+<pre><code class="language-markdown"># How to write as &lt;Name&gt;
+
+## Core directives
+- Median length 68 words. Over 120 is off-voice.
+- Open with &quot;Hi &lt;first name&gt;&quot; (61%) or no greeting on replies (28%).
+- Put the ask in the first two sentences. ...
+
+## Never do this
+- Never opens with &quot;I hope this finds you well.&quot;
+- Never uses &quot;circle back&quot;, &quot;touch base&quot;, &quot;reach out&quot;.
+- Never uses exclamation marks with clients (0 in 47 messages).
+
+## By audience
+| Register | Delta from baseline |
+| --- | --- |
+| client | +40% length, no contractions, formal signoff |
+| internal | −30% length, lowercase subjects, heavy em dash |
+
+## Examples
+### Client — asking for a decision
+&lt;redacted verbatim email&gt;
+
+## Metadata
+Corpus: 112 messages, 2025-08-14 → 2026-08-12. Generated 2026-08-16.
+</code></pre>
+<p>The <strong>Never do this</strong> section is the highest-value part. Positive guidance nudges;
+prohibitions are what stop output from reading as generic AI prose, because the
+tells are mostly things the person never writes.</p>
+<h2>Write mode</h2>
+<p><code>/write-as-me &lt;intent&gt;</code>:</p>
+<ol>
+<li>Load the profile; if none exists, offer to run analysis first.</li>
+<li>Determine register from the recipient if supplied; ask only when genuinely
+ambiguous.</li>
+<li>Draft.</li>
+<li>Self-check the draft against the anti-pattern list and the length band before
+presenting. Revise silently on a violation.</li>
+<li>Present the draft in chat. Offer to create a Gmail draft when the connector is
+available. Never send.</li>
+</ol>
+<h2>Testing</h2>
+<p><strong>Synthetic fixtures.</strong> A fake persona with roughly 40 emails across registers,
+committed to the repo. The entire pipeline is exercised publicly without anyone's real
+mail, which also gives contributors something to develop against.</p>
+<p><strong>Unit tests (pytest, deterministic).</strong></p>
+<ul>
+<li><code>test_ingest.py</code> — quote-stripping across Gmail, Outlook, and Apple formats;
+signature detection; auto-reply rejection; dedupe threshold.</li>
+<li><code>test_fingerprint.py</code> — every metric against hand-computed values on a small
+fixture.</li>
+<li><code>test_redact.py</code> — PII patterns caught; length preserved within tolerance; the
+user's own name survives in signoffs.</li>
+</ul>
+<p><strong>Holdout eval (<code>scripts/eval_holdout.py</code>, manual).</strong> Five messages are withheld
+before fingerprinting. Drafts are generated from each held-out subject plus a one-line
+intent, with no sight of the original. The harness then compares fingerprints three
+ways: draft versus held-out original, and a control draft written with no profile
+versus the same original.</p>
+<p>Success criterion: the profile-guided draft is closer to the original than the control
+on at least 70% of metrics. This makes &quot;it sounds like me&quot; falsifiable, which it
+otherwise is not, and it catches regressions when the analysis logic changes.</p>
+<h2>Error handling</h2>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Fewer than 12 usable messages</td>
+<td>Stop; report counts found and dropped, with reasons</td>
+</tr>
+<tr>
+<td>No connector, no local files</td>
+<td>Fall through to paste mode</td>
+</tr>
+<tr>
+<td>Python missing</td>
+<td>Clear message naming the requirement; no silent degradation</td>
+</tr>
+<tr>
+<td>Single register only</td>
+<td>Generate baseline profile; note the limitation in metadata</td>
+</tr>
+<tr>
+<td>Corpus mostly non-English</td>
+<td>Suppress English-specific metrics; note it</td>
+</tr>
+<tr>
+<td>Profile missing in write mode</td>
+<td>Offer to run analysis</td>
+</tr>
+<tr>
+<td>Corrupt mbox</td>
+<td>Skip unparseable messages, report the count, continue</td>
+</tr>
+</tbody>
+</table>
+<h2>Privacy</h2>
+<ul>
+<li>Profiles and cache live in <code>~/.claude/wam/</code>, never inside the repo.</li>
+<li><code>corpus.json</code> and <code>raw.json</code> are deleted at the end of an analysis run unless
+<code>--keep-cache</code> is passed.</li>
+<li><code>.gitignore</code> covers <code>emails/</code>, <code>*.mbox</code>, <code>*.eml</code>, and <code>.wam/</code> so that a user who
+puts an export in the working directory cannot commit it.</li>
+<li>The README states plainly that a generated profile contains excerpts of real mail
+and should not be shared or committed.</li>
+</ul>
+<h2>Out of scope for v1</h2>
+<p>Sending mail; tone adjustment sliders; profiles for people other than the user;
+non-email formats such as Slack or LinkedIn; automatic profile refresh on a schedule.</p>
+
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral" });
+</script>
+</body>
+</html>
