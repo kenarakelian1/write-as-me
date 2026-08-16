@@ -74,11 +74,24 @@ Read `fingerprint.json` and `exemplars.redacted.json`. **Never read `corpus.json
 
 ### Step 4 — Verify the redaction
 
-Scan the redacted exemplars for anything the regexes missed: person names in the body,
-company names, project code names, account numbers. Replace with `[FIRST]`,
-`[COMPANY]`, `[PROJECT]`. Keep the owner's own first name in signoffs.
+This is the last line of defense before real email excerpts are written to disk. A
+skim is not enough — regex misses are rare but real (company names, project code
+names, and account numbers are not shaped like the emails/URLs/amounts/phones the
+regexes catch). Go exemplar by exemplar, not corpus by corpus:
 
-Never present an exemplar you have not personally checked.
+For each exemplar in `exemplars.redacted.json`, in order:
+1. Read the full text of that one exemplar.
+2. Check it against each of: person names in the body, company/organization names,
+   project code names, account or reference numbers.
+3. Replace anything the regexes missed with `[FIRST]`, `[COMPANY]`, or `[PROJECT]`.
+   Keep the owner's own first name in signoffs.
+4. State explicitly, per exemplar, that it was checked — e.g. "Exemplar 3/20
+   (client): checked, no leaks" or "Exemplar 7/20 (cold_outreach): checked, redacted
+   company name 'Ashford'."
+
+Do not move to Step 5 until every exemplar has its own confirmation line. Never
+present an exemplar in the final profile that you have not personally checked this
+way.
 
 ### Step 5 — Write the profile
 
@@ -172,3 +185,107 @@ Too thin to profile: <suppressed with counts>. Generated <date>.
 Delete `~/.claude/wam/cache/` unless the user passed `--keep-cache`. Report: tier used,
 messages analyzed, registers found, profile path. Show the **Never do this** list, since
 it is the most immediately useful part, and offer to draft something as a test.
+
+## Write mode
+
+Triggered when the user supplies an intent: `/wam ask Priya to confirm the Q3 date`.
+
+### Step 1 — Load the profile
+
+Read `~/.claude/wam/default.md`. If it is missing, say so and offer to run analyze mode
+instead. Do not draft from a guess about the user's voice — a generic draft with no
+profile is worse than declining, because it looks finished.
+
+### Step 2 — Pick the register
+
+Infer from context, in order:
+- Recipient's domain matches the user's own → `internal`.
+- Recipient's domain is a personal/consumer provider (gmail.com, etc.) → `personal`.
+- A named company, an unfamiliar business domain, or an existing-relationship
+  recipient → `client`.
+- No recipient given and the request reads like first contact / prospecting →
+  `cold_outreach`, if that register exists in the profile.
+
+Ask **at most one question**, and only when two candidate registers would produce a
+materially different draft (different length band, ask placement, or signoff) and
+nothing in the request disambiguates them. Never ask about tone, formality, or "how
+would you like this to sound" — the profile already answers that; asking would be
+interrogating the user about something the profile exists to settle.
+
+If the chosen register is in the profile's "too thin to profile" list, say so, fall
+back to the baseline directives, and flag the draft as unregistered when you present it.
+
+### Step 3 — Draft
+
+Pull for the chosen register specifically — not the baseline — using the **By
+audience** delta row and that register's own **Examples** entry as the primary
+reference. Where a register has no meaningful delta ("matches baseline"), the Core
+directives numbers apply directly. Match:
+
+- length: that register's median word count, not the overall baseline median
+- opener: that register's pattern and rate, not the baseline opener
+- ask placement: early/mid/late per that register's median position
+- signoff: that register's closing line and name form
+- punctuation tics: that register's rate for each tic named in the profile
+- paragraph count and structure, matching the shape of the register's Example
+
+If the request is a one-line reply under ~15 words and the profile documents a
+terse-ack pattern, use that micro-mode instead of a full register draft.
+
+Imitate the exemplars for that register first and the metrics second — the exemplars
+carry the voice; the metrics are guardrails, not a template to fill in mechanically.
+
+### Step 4 — Self-check before showing anything
+
+This is the load-bearing step. A draft that is approximately in-voice reads as
+AI-written; the profile's **Never do this** list exists because absent traits are
+what make AI email recognizable as AI email. Work through every item below against
+the draft, in order, for the register you drafted in. Do not replace this with a
+general "review for quality" pass, and do not skip an item because the draft "feels
+right" — feel is exactly what this list is here to override.
+
+1. **Length.** Count the words. Compare to *this register's* median (By audience),
+   not the overall baseline. Over ~1.8x that median is off-voice — cut content, don't
+   compress by deleting articles or contractions to hit a number.
+2. **Never-do-this list, one line at a time.** Open the profile's Never do this
+   section and check the draft against each line individually, the same way exemplar
+   redaction is checked one exemplar at a time — not as a single skim over the whole
+   list. For each line: does the draft contain this exact pattern (a stock phrase, a
+   punctuation mark, a structural habit)? If yes, rewrite it out, then continue to the
+   next line.
+3. **Opener.** Does it match this register's dominant opener pattern and rate? If the
+   register's rate is well under 100%, the profile's own variation is license — don't
+   force the majority pattern onto every draft — but never invent an opener pattern
+   that isn't attested in the profile at all.
+4. **Ask placement.** Is the ask at roughly this register's median position (open /
+   middle / held-back), not wherever felt natural while writing?
+5. **Signoff.** Does the closing line and name form match this register exactly —
+   full name after a closing word, vs. bare first name after an em dash, vs. no
+   signoff at all? A signoff form the profile marks as never occurring (e.g.
+   initial-only) is disqualifying on its own.
+6. **Punctuation tics.** Check this register's rate for each tic the profile names
+   (em dash, semicolon, ellipsis, etc.), not the baseline rate. Marks the profile
+   lists at zero must be exactly zero in the draft — "used sparingly" is a fail, not
+   a pass.
+7. **Contractions.** If the profile states a contraction rate near 100%, no
+   fully-expanded form ("do not", "will not", "it is") should appear anywhere a
+   contraction was grammatically possible.
+8. **Structure.** Paragraph count and list handling should match what the profile
+   says for structure (e.g. "never uses bullet points" becomes short prose sentences
+   or a colon-led fragment instead), even when a bulleted list is the obvious default
+   for the content.
+
+If any check fails, fix it and re-run the full list from item 1 — don't spot-fix one
+item and assume the rest still hold; a fix to length or structure can undo an opener
+or signoff that previously passed. Do this silently: the user sees a finished draft,
+never a checklist, a score, or a running commentary on what got fixed.
+
+### Step 5 — Present
+
+Show subject and body as plain text, ready to copy. Add one line naming the register
+used — and, if the register was too thin to profile, say plainly that the baseline
+was used instead. If Gmail tools are available, offer to save it as a draft; do not
+create the draft without being asked.
+
+**Never send email.** Creating a draft is the furthest this skill goes, and only when
+the user explicitly asks for one.
