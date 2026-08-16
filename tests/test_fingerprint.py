@@ -21,28 +21,98 @@ from fingerprint import (  # noqa: E402
 )
 from fingerprint import lexicon  # add to the import block
 from fingerprint import aggregate, classify_register, select_exemplars  # add to imports
+from fingerprint import assign_registers  # add to imports
 
 USER_DOMAIN = "northwind-labs.com"
 
 
+# classify_register no longer infers first-contact from is_reply/subject — that
+# conflated "the subject line happens to start with Re:" with "we have an
+# established relationship with this recipient", which is not what the design
+# spec means by cold_outreach ("no prior thread from that address"). Whether a
+# message is first contact is now computed once, corpus-wide, by
+# assign_registers() and passed in explicitly.
 def test_classify_internal():
     msg = {"to_domains": ["northwind-labs.com"], "is_reply": True, "body": "x"}
-    assert classify_register(msg, USER_DOMAIN) == "internal"
+    assert classify_register(msg, USER_DOMAIN, is_first_contact=False) == "internal"
 
 
 def test_classify_personal_consumer_domain():
     msg = {"to_domains": ["gmail.com"], "is_reply": False, "body": "x"}
-    assert classify_register(msg, USER_DOMAIN) == "personal"
+    assert classify_register(msg, USER_DOMAIN, is_first_contact=True) == "personal"
 
 
-def test_classify_cold_outreach_is_non_reply_external():
+def test_classify_cold_outreach_is_first_contact():
     msg = {"to_domains": ["harborline.com"], "is_reply": False, "body": "x"}
-    assert classify_register(msg, USER_DOMAIN) == "cold_outreach"
+    assert classify_register(msg, USER_DOMAIN, is_first_contact=True) == "cold_outreach"
 
 
-def test_classify_client_is_external_reply():
-    msg = {"to_domains": ["harborline.com"], "is_reply": True, "body": "x"}
-    assert classify_register(msg, USER_DOMAIN) == "client"
+def test_classify_client_is_established_contact():
+    msg = {"to_domains": ["harborline.com"], "is_reply": False, "body": "x"}
+    assert classify_register(msg, USER_DOMAIN, is_first_contact=False) == "client"
+
+
+def test_assign_registers_second_message_to_seen_domain_is_client():
+    msgs = [
+        {"id": "1", "date": "2025-01-01T00:00:00", "to_domains": ["harborline.com"],
+         "is_reply": False, "subject": "Kickoff", "body": "x"},
+        {"id": "2", "date": "2025-02-01T00:00:00", "to_domains": ["harborline.com"],
+         "is_reply": False, "subject": "Follow-up", "body": "x"},
+    ]
+    result = assign_registers(msgs, USER_DOMAIN)
+    assert result["1"] == "cold_outreach"
+    assert result["2"] == "client"
+
+
+def test_assign_registers_first_message_to_new_domain_is_cold_outreach():
+    msgs = [
+        {"id": "1", "date": "2025-01-01T00:00:00", "to_domains": ["harborline.com"],
+         "is_reply": False, "subject": "Intro", "body": "x"},
+    ]
+    result = assign_registers(msgs, USER_DOMAIN)
+    assert result["1"] == "cold_outreach"
+
+
+def test_assign_registers_mixed_new_and_established_domain_is_client():
+    msgs = [
+        {"id": "1", "date": "2025-01-01T00:00:00", "to_domains": ["harborline.com"],
+         "is_reply": False, "subject": "Intro", "body": "x"},
+        {"id": "2", "date": "2025-02-01T00:00:00",
+         "to_domains": ["harborline.com", "brand-new.com"],
+         "is_reply": False, "subject": "Update plus new stakeholder", "body": "x"},
+    ]
+    result = assign_registers(msgs, USER_DOMAIN)
+    assert result["1"] == "cold_outreach"
+    assert result["2"] == "client"
+
+
+def test_assign_registers_uses_chronological_order_not_list_order():
+    # Listed with the later message first; chronological order must still
+    # decide which one counts as first contact.
+    msgs = [
+        {"id": "later", "date": "2025-03-01T00:00:00", "to_domains": ["harborline.com"],
+         "is_reply": False, "subject": "Follow-up", "body": "x"},
+        {"id": "earlier", "date": "2025-01-01T00:00:00", "to_domains": ["harborline.com"],
+         "is_reply": False, "subject": "Intro", "body": "x"},
+    ]
+    result = assign_registers(msgs, USER_DOMAIN)
+    assert result["earlier"] == "cold_outreach"
+    assert result["later"] == "client"
+
+
+def test_assign_registers_empty_date_sorts_last():
+    # A message with no parseable date can't be placed in time, so it must
+    # never be allowed to claim first-contact status ahead of a dated message
+    # to the same domain.
+    msgs = [
+        {"id": "undated", "date": "", "to_domains": ["harborline.com"],
+         "is_reply": False, "subject": "Undated", "body": "x"},
+        {"id": "dated", "date": "2025-01-01T00:00:00", "to_domains": ["harborline.com"],
+         "is_reply": False, "subject": "Intro", "body": "x"},
+    ]
+    result = assign_registers(msgs, USER_DOMAIN)
+    assert result["dated"] == "cold_outreach"
+    assert result["undated"] == "client"
 
 
 def test_select_exemplars_prefers_median_length_with_an_ask():

@@ -224,7 +224,16 @@ MIN_REGISTER_SIZE = 8
 MIN_CORPUS_SIZE = 12
 
 
-def classify_register(msg: dict, user_domain: str) -> str:
+def classify_register(msg: dict, user_domain: str, is_first_contact: bool) -> str:
+    """Bucket a message by relationship, not by subject-line shape.
+
+    internal/personal/vendor are decided from the message alone. client vs.
+    cold_outreach is NOT inferred from is_reply (a "Re:" subject says nothing
+    about whether *this* recipient has a prior relationship with the user) —
+    it is handed in by assign_registers(), which derives it from whether any
+    recipient domain on the message has appeared earlier in the user's own
+    chronological send history.
+    """
     domains = msg.get("to_domains") or []
     if any(d == user_domain for d in domains):
         return "internal"
@@ -233,7 +242,42 @@ def classify_register(msg: dict, user_domain: str) -> str:
     subject = (msg.get("subject") or "").lower()
     if any(hint in subject for hint in VENDOR_HINTS):
         return "vendor"
-    return "client" if msg.get("is_reply") else "cold_outreach"
+    return "cold_outreach" if is_first_contact else "client"
+
+
+def assign_registers(messages: list[dict], user_domain: str) -> dict[str, str]:
+    """Map each message id to its register, deriving cold_outreach vs. client
+    from relationship history instead of the reply flag.
+
+    Walks messages in chronological order (undated messages sort last, so an
+    unorderable message can never wrongly claim first-contact status) and
+    tracks which external, non-consumer recipient domains have already been
+    written to. A message counts as first contact only when *every* such
+    domain on it is new; if any domain was seen on an earlier message, the
+    whole message is "client" even if it also includes a brand-new domain.
+
+    is_reply is used as a secondary signal, not the primary rule: a reply
+    ("Re:") is evidence a thread already existed even when this sent-mail-only
+    corpus has no earlier message to prove it, so a first-domain message that
+    is a reply is still treated as an established contact rather than cold
+    outreach.
+    """
+    def sort_key(msg: dict) -> tuple[bool, str]:
+        date = msg.get("date") or ""
+        return (date == "", date)
+
+    seen_domains: set[str] = set()
+    result: dict[str, str] = {}
+    for msg in sorted(messages, key=sort_key):
+        domains = [
+            d for d in (msg.get("to_domains") or [])
+            if d != user_domain and d not in CONSUMER_DOMAINS
+        ]
+        domain_repeat = bool(domains) and any(d in seen_domains for d in domains)
+        is_first_contact = not domain_repeat and not msg.get("is_reply")
+        result[msg["id"]] = classify_register(msg, user_domain, is_first_contact)
+        seen_domains.update(domains)
+    return result
 
 
 def aggregate(messages: list[dict], baseline: dict) -> dict:
@@ -325,9 +369,10 @@ def main() -> int:
         return 1
 
     user_domain = corpus["user"].split("@", 1)[1].lower()
+    register_by_id = assign_registers(messages, user_domain)
     buckets: dict[str, list[dict]] = {}
     for msg in messages:
-        buckets.setdefault(classify_register(msg, user_domain), []).append(msg)
+        buckets.setdefault(register_by_id[msg["id"]], []).append(msg)
 
     registers, suppressed = {}, {}
     for name, group in buckets.items():
