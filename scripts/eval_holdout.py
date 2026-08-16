@@ -1,0 +1,75 @@
+# scripts/eval_holdout.py
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from fingerprint import aggregate  # noqa: E402
+
+PASS_THRESHOLD = 0.7
+
+
+def flatten(node: dict, prefix: str = "") -> dict:
+    """Flatten a metric block to scalar leaves. Lists are skipped as unorderable."""
+    out: dict[str, float] = {}
+    for key, value in node.items():
+        path = f"{prefix}{key}"
+        if isinstance(value, dict):
+            out.update(flatten(value, f"{path}."))
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[path] = float(value)
+    return out
+
+
+def compare(a: dict, b: dict) -> dict:
+    flat_a, flat_b = flatten(a), flatten(b)
+    return {
+        key: abs(flat_a[key] - flat_b[key])
+        for key in flat_a.keys() & flat_b.keys()
+    }
+
+
+def verdict(profile_deltas: dict, control_deltas: dict) -> dict:
+    shared = profile_deltas.keys() & control_deltas.keys()
+    closer = sum(1 for k in shared if profile_deltas[k] < control_deltas[k])
+    share = closer / len(shared) if shared else 0.0
+    return {
+        "metrics_compared": len(shared),
+        "profile_closer": closer,
+        "share": round(share, 3),
+        "pass": share >= PASS_THRESHOLD,
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Compare profile-guided drafts against held-out originals."
+    )
+    ap.add_argument("--holdout", required=True, help="JSON list of held-out messages")
+    ap.add_argument("--profile-drafts", required=True)
+    ap.add_argument("--control-drafts", required=True)
+    ap.add_argument("--baseline", required=True)
+    args = ap.parse_args()
+
+    baseline = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
+    load = lambda p: json.loads(Path(p).read_text(encoding="utf-8"))  # noqa: E731
+
+    truth = aggregate(load(args.holdout), baseline)
+    profile_deltas = compare(truth, aggregate(load(args.profile_drafts), baseline))
+    control_deltas = compare(truth, aggregate(load(args.control_drafts), baseline))
+    result = verdict(profile_deltas, control_deltas)
+
+    print(json.dumps(result, indent=2))
+    worst = sorted(profile_deltas.items(), key=lambda kv: -kv[1])[:5]
+    print("\nLargest remaining gaps:")
+    for metric, delta in worst:
+        print(f"  {metric}: {delta:.3f}")
+    return 0 if result["pass"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
