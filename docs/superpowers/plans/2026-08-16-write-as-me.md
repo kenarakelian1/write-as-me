@@ -1164,7 +1164,8 @@ git commit -m "feat: core style metrics — shape, openers, mechanics, stance, l
 **Interfaces:**
 - Consumes: everything from Task 3.
 - Produces:
-  - `classify_register(msg: dict, user_domain: str) -> str` → one of `"internal"`, `"client"`, `"cold_outreach"`, `"vendor"`, `"personal"`
+  - `classify_register(msg: dict, user_domain: str, is_first_contact: bool) -> str` → one of `"internal"`, `"client"`, `"cold_outreach"`, `"vendor"`, `"personal"`
+  - `assign_registers(messages: list[dict], user_domain: str) -> dict[str, str]` → message id to register, deriving first contact corpus-wide
   - `aggregate(messages: list[dict], baseline: dict) -> dict` → full metric block for a message set
   - `select_exemplars(messages: list[dict], count: int = 4) -> list[dict]`
   - CLI: `python scripts/fingerprint.py --corpus corpus.json --baseline fixtures/baseline_ngrams.json --out fingerprint.json --exemplars exemplars.json`
@@ -1174,29 +1175,31 @@ git commit -m "feat: core style metrics — shape, openers, mechanics, stance, l
 - [ ] **Step 1: Write failing tests for register classification**
 
 ```python
-from fingerprint import aggregate, classify_register, select_exemplars  # add to imports
+from fingerprint import (  # add to imports
+    aggregate, assign_registers, classify_register, select_exemplars,
+)
 
 USER_DOMAIN = "northwind-labs.com"
 
 
 def test_classify_internal():
     msg = {"to_domains": ["northwind-labs.com"], "is_reply": True, "body": "x"}
-    assert classify_register(msg, USER_DOMAIN) == "internal"
+    assert classify_register(msg, USER_DOMAIN, False) == "internal"
 
 
 def test_classify_personal_consumer_domain():
     msg = {"to_domains": ["gmail.com"], "is_reply": False, "body": "x"}
-    assert classify_register(msg, USER_DOMAIN) == "personal"
+    assert classify_register(msg, USER_DOMAIN, True) == "personal"
 
 
 def test_classify_cold_outreach_is_non_reply_external():
     msg = {"to_domains": ["harborline.com"], "is_reply": False, "body": "x"}
-    assert classify_register(msg, USER_DOMAIN) == "cold_outreach"
+    assert classify_register(msg, USER_DOMAIN, True) == "cold_outreach"
 
 
 def test_classify_client_is_external_reply():
     msg = {"to_domains": ["harborline.com"], "is_reply": True, "body": "x"}
-    assert classify_register(msg, USER_DOMAIN) == "client"
+    assert classify_register(msg, USER_DOMAIN, False) == "client"
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -1216,7 +1219,11 @@ MIN_REGISTER_SIZE = 8
 MIN_CORPUS_SIZE = 12
 
 
-def classify_register(msg: dict, user_domain: str) -> str:
+def classify_register(msg: dict, user_domain: str, is_first_contact: bool) -> str:
+    """First contact is decided corpus-wide by assign_registers, not from this
+    message alone. The spec defines cold outreach as "no prior thread from that
+    address" — a fresh subject line to a long-standing client is NOT cold
+    outreach, so `is_reply` must never be the primary signal."""
     domains = msg.get("to_domains") or []
     if any(d == user_domain for d in domains):
         return "internal"
@@ -1225,7 +1232,29 @@ def classify_register(msg: dict, user_domain: str) -> str:
     subject = (msg.get("subject") or "").lower()
     if any(hint in subject for hint in VENDOR_HINTS):
         return "vendor"
-    return "client" if msg.get("is_reply") else "cold_outreach"
+    return "cold_outreach" if is_first_contact else "client"
+
+
+def assign_registers(messages: list[dict], user_domain: str) -> dict[str, str]:
+    """Map message id -> register, deriving first contact from the corpus.
+
+    Walks chronologically, tracking which external recipient domains have been
+    seen. A message is first contact only when EVERY external domain on it is
+    new; if it includes any established domain it is client correspondence.
+    Undated messages sort last so they can never steal first-contact status.
+    """
+    ordered = sorted(messages, key=lambda m: (m.get("date", "") == "", m.get("date", "")))
+    seen: set[str] = set()
+    assigned: dict[str, str] = {}
+    for msg in ordered:
+        external = [
+            d for d in (msg.get("to_domains") or [])
+            if d != user_domain and d not in CONSUMER_DOMAINS
+        ]
+        is_first_contact = bool(external) and all(d not in seen for d in external)
+        assigned[msg["id"]] = classify_register(msg, user_domain, is_first_contact)
+        seen.update(external)
+    return assigned
 
 
 def aggregate(messages: list[dict], baseline: dict) -> dict:
@@ -1362,8 +1391,9 @@ def main() -> int:
 
     user_domain = corpus["user"].split("@", 1)[1].lower()
     buckets: dict[str, list[dict]] = {}
+    assigned = assign_registers(messages, user_domain)
     for msg in messages:
-        buckets.setdefault(classify_register(msg, user_domain), []).append(msg)
+        buckets.setdefault(assigned[msg["id"]], []).append(msg)
 
     registers, suppressed = {}, {}
     for name, group in buckets.items():
