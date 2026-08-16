@@ -46,7 +46,16 @@ def test_preserves_length_within_tolerance():
 
 
 def test_no_raw_emails_survive_full_pipeline(tmp_path):
-    """Belt and braces: run the real fixture corpus through and grep the output."""
+    """Belt and braces: run the real fixture corpus through and grep the output.
+
+    Self-validating: several fixtures now plant inline PII (email, phone,
+    currency) in surviving body prose (not in stripped signature blocks or
+    quoted replies), spread across registers. Before asserting the redacted
+    output is clean, this test first asserts the *pre-redaction* exemplars
+    actually contain that PII — otherwise a future fixture change that stops
+    those exemplars from being selected would make this test pass on an
+    empty set instead of failing loudly.
+    """
     root = Path(__file__).parent.parent
     corpus, fp = tmp_path / "corpus.json", tmp_path / "fp.json"
     ex, red = tmp_path / "ex.json", tmp_path / "red.json"
@@ -69,7 +78,27 @@ def test_no_raw_emails_survive_full_pipeline(tmp_path):
          "--in", str(ex), "--out", str(red), "--keep-name", "Dana"],
         check=True, capture_output=True,
     )
+
+    pre_text = ex.read_text(encoding="utf-8")
+    email_re = r"[\w.+-]+@[\w-]+\.\w+"
+    phone_re = r"\+?\d[\d\s().-]{8,}\d"
+    currency_re = r"\$\s?\d[\d,]*(?:\.\d{2})?\b"
+
+    assert re.search(email_re, pre_text), (
+        "no raw email address in pre-redaction exemplars.json — the sweep "
+        "below would pass vacuously"
+    )
+    assert re.search(phone_re, pre_text), (
+        "no raw phone number in pre-redaction exemplars.json — the sweep "
+        "below would pass vacuously"
+    )
+    assert re.search(currency_re, pre_text), (
+        "no raw currency amount in pre-redaction exemplars.json — the sweep "
+        "below would pass vacuously"
+    )
+
     text = red.read_text(encoding="utf-8")
-    assert not re.search(r"[\w.+-]+@[\w-]+\.\w+", text), "raw email address survived"
-    assert not re.search(r"\+?\d[\d\s().-]{8,}\d", text), "raw phone number survived"
+    assert not re.search(email_re, text), "raw email address survived"
+    assert not re.search(phone_re, text), "raw phone number survived"
+    assert not re.search(currency_re, text), "raw currency amount survived"
     assert "Dana" in text, "profile owner's name should be preserved"
