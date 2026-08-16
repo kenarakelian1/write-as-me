@@ -2083,7 +2083,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run to verify tests pass**
 
 Run: `python -m pytest tests/test_eval.py -v`
-Expected: 4 passed.
+Expected: 5 passed.
 
 - [ ] **Step 5: Document the eval procedure in `README.md`**
 
