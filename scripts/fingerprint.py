@@ -213,3 +213,152 @@ def lexicon(messages: list[dict], baseline: dict, top_n: int = 15) -> list[dict]
             )
     scored.sort(key=lambda item: item["log_odds"], reverse=True)
     return scored[:top_n]
+
+
+CONSUMER_DOMAINS = {
+    "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
+    "icloud.com", "me.com", "aol.com", "proton.me",
+}
+VENDOR_HINTS = ("billing", "support", "invoices", "noreply", "accounts")
+MIN_REGISTER_SIZE = 8
+MIN_CORPUS_SIZE = 12
+
+
+def classify_register(msg: dict, user_domain: str) -> str:
+    domains = msg.get("to_domains") or []
+    if any(d == user_domain for d in domains):
+        return "internal"
+    if any(d in CONSUMER_DOMAINS for d in domains):
+        return "personal"
+    subject = (msg.get("subject") or "").lower()
+    if any(hint in subject for hint in VENDOR_HINTS):
+        return "vendor"
+    return "client" if msg.get("is_reply") else "cold_outreach"
+
+
+def aggregate(messages: list[dict], baseline: dict) -> dict:
+    joined = "\n\n".join(m["body"] for m in messages)
+    openers = Counter(opener_pattern(m["body"]) for m in messages)
+    closer_data = [closer_pattern(m["body"]) for m in messages]
+    closers = Counter(c["signoff"] for c in closer_data)
+    name_forms = Counter(c["name_form"] for c in closer_data)
+    placements = [
+        p for p in (ask_placement(m["body"]) for m in messages) if p is not None
+    ]
+    subjects = [m["subject"] for m in messages if m["subject"]]
+    return {
+        "shape": shape_metrics(messages),
+        "openers": {k: round(v / len(messages), 3) for k, v in openers.items()},
+        "closers": {k: round(v / len(messages), 3) for k, v in closers.items()},
+        "name_forms": {k: round(v / len(messages), 3) for k, v in name_forms.items()},
+        "contraction_rate": round(contraction_rate(joined), 3),
+        "punctuation": punct_rates(joined),
+        "stance": stance(joined),
+        "ask_placement_median": (
+            round(statistics.median(placements), 3) if placements else None
+        ),
+        "subject": {
+            "median_words": (
+                statistics.median([len(s.split()) for s in subjects])
+                if subjects else 0
+            ),
+            "lowercase_rate": round(
+                sum(1 for s in subjects if s == s.lower()) / len(subjects), 3
+            ) if subjects else 0.0,
+            "question_rate": round(
+                sum(1 for s in subjects if s.rstrip().endswith("?")) / len(subjects), 3
+            ) if subjects else 0.0,
+        },
+        "lexicon": lexicon(messages, baseline),
+    }
+
+
+def select_exemplars(messages: list[dict], count: int = 4) -> list[dict]:
+    """Pick messages that best demonstrate the voice: near-median length, with an ask."""
+    if not messages:
+        return []
+    median_words = statistics.median(m["word_count"] for m in messages)
+
+    def score(msg: dict) -> float:
+        spread = abs(msg["word_count"] - median_words) / (median_words or 1)
+        has_ask = 1.0 if ASK.search(msg["body"]) else 0.0
+        multi_para = 0.3 if len(paragraphs(msg["body"])) > 1 else 0.0
+        return has_ask + multi_para - spread
+
+    ranked = sorted(messages, key=score, reverse=True)
+    return [
+        {"subject": m["subject"], "body": m["body"], "word_count": m["word_count"]}
+        for m in ranked[:count]
+    ]
+
+
+NON_ASCII_THRESHOLD = 0.15
+
+
+def _english_likely(messages: list[dict]) -> bool:
+    joined = "".join(m["body"] for m in messages)
+    if not joined:
+        return True
+    non_ascii = sum(1 for ch in joined if ord(ch) > 127)
+    return non_ascii / len(joined) < NON_ASCII_THRESHOLD
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Compute a style fingerprint.")
+    ap.add_argument("--corpus", required=True)
+    ap.add_argument("--baseline", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--exemplars", required=True)
+    args = ap.parse_args()
+
+    corpus = json.loads(Path(args.corpus).read_text(encoding="utf-8"))
+    baseline = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
+    messages = corpus["messages"]
+
+    if len(messages) < MIN_CORPUS_SIZE:
+        print(
+            f"ERROR: {len(messages)} usable messages, need {MIN_CORPUS_SIZE}. "
+            f"Parsed {corpus['stats']['raw']}, "
+            f"dropped {corpus['stats']['raw'] - len(messages)} as quoted-only, "
+            f"auto-replies, duplicates, or too short."
+        )
+        return 1
+
+    user_domain = corpus["user"].split("@", 1)[1].lower()
+    buckets: dict[str, list[dict]] = {}
+    for msg in messages:
+        buckets.setdefault(classify_register(msg, user_domain), []).append(msg)
+
+    registers, suppressed = {}, {}
+    for name, group in buckets.items():
+        if len(group) >= MIN_REGISTER_SIZE:
+            registers[name] = {"count": len(group), "metrics": aggregate(group, baseline)}
+        else:
+            suppressed[name] = len(group)
+
+    dates = sorted(m["date"] for m in messages if m["date"])
+    fingerprint = {
+        "user": corpus["user"],
+        "corpus_size": len(messages),
+        "date_range": [dates[0], dates[-1]] if dates else ["", ""],
+        "baseline": aggregate(messages, baseline),
+        "registers": registers,
+        "suppressed_registers": suppressed,
+        "english_metrics_valid": _english_likely(messages),
+    }
+    Path(args.out).write_text(json.dumps(fingerprint, indent=2), encoding="utf-8")
+
+    exemplars = {name: select_exemplars(group) for name, group in buckets.items()}
+    if corpus.get("terse_ack"):
+        exemplars["terse_ack"] = select_exemplars(corpus["terse_ack"], count=3)
+    Path(args.exemplars).write_text(json.dumps(exemplars, indent=2), encoding="utf-8")
+
+    print(
+        f"{len(messages)} messages, {len(registers)} registers "
+        f"-> {args.out}, {args.exemplars}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

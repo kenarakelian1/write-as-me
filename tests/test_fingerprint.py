@@ -1,6 +1,8 @@
 # tests/test_fingerprint.py
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +20,81 @@ from fingerprint import (  # noqa: E402
     stance,
 )
 from fingerprint import lexicon  # add to the import block
+from fingerprint import aggregate, classify_register, select_exemplars  # add to imports
+
+USER_DOMAIN = "northwind-labs.com"
+
+
+def test_classify_internal():
+    msg = {"to_domains": ["northwind-labs.com"], "is_reply": True, "body": "x"}
+    assert classify_register(msg, USER_DOMAIN) == "internal"
+
+
+def test_classify_personal_consumer_domain():
+    msg = {"to_domains": ["gmail.com"], "is_reply": False, "body": "x"}
+    assert classify_register(msg, USER_DOMAIN) == "personal"
+
+
+def test_classify_cold_outreach_is_non_reply_external():
+    msg = {"to_domains": ["harborline.com"], "is_reply": False, "body": "x"}
+    assert classify_register(msg, USER_DOMAIN) == "cold_outreach"
+
+
+def test_classify_client_is_external_reply():
+    msg = {"to_domains": ["harborline.com"], "is_reply": True, "body": "x"}
+    assert classify_register(msg, USER_DOMAIN) == "client"
+
+
+def test_select_exemplars_prefers_median_length_with_an_ask():
+    msgs = [
+        {"subject": "a", "body": "tiny", "word_count": 1},
+        {"subject": "b", "body": "Can you confirm the date? " + "word " * 40,
+         "word_count": 45},
+        {"subject": "c", "body": "word " * 400, "word_count": 400},
+    ]
+    picked = select_exemplars(msgs, count=1)
+    assert picked[0]["subject"] == "b"
+
+
+def test_select_exemplars_respects_count():
+    msgs = [
+        {"subject": str(i), "body": "Can you confirm? " + "word " * 30,
+         "word_count": 33}
+        for i in range(10)
+    ]
+    assert len(select_exemplars(msgs, count=4)) == 4
+
+
+def test_fingerprint_cli_on_synthetic_corpus(tmp_path):
+    root = Path(__file__).parent.parent
+    corpus = tmp_path / "corpus.json"
+    subprocess.run(
+        [sys.executable, str(root / "scripts" / "ingest.py"),
+         "--eml-dir", str(root / "fixtures" / "synthetic"),
+         "--user", "dana@northwind-labs.com", "--out", str(corpus)],
+        check=True, capture_output=True,
+    )
+    fp = tmp_path / "fingerprint.json"
+    ex = tmp_path / "exemplars.json"
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "fingerprint.py"),
+         "--corpus", str(corpus),
+         "--baseline", str(root / "fixtures" / "baseline_ngrams.json"),
+         "--out", str(fp), "--exemplars", str(ex)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(fp.read_text(encoding="utf-8"))
+
+    # Dana's designed traits must be recovered from the data
+    assert data["baseline"]["shape"]["words_per_email"]["median"] < 120
+    assert "internal" in data["registers"]
+    assert data["baseline"]["punctuation"]["em_dash"] > 0
+    phrases = [item["phrase"] for item in data["baseline"]["lexicon"]]
+    assert any("worth" in p for p in phrases)
+
+    exemplars = json.loads(ex.read_text(encoding="utf-8"))
+    assert exemplars["internal"]
 
 
 def test_sentences_splits_on_terminators():
