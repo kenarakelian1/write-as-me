@@ -133,3 +133,13 @@ def test_ask_placement_detects_bare_imperative():
     client deck by noon", "Move the travel line...") is still an ask."""
     assert ask_placement("Need the client deck by noon.") == 0.0
     assert ask_placement("Move the travel line into professional services.") == 0.0
+
+
+def test_ask_placement_ignores_hyphenated_declaratives():
+    """IMPERATIVE_START's word boundary fires before a hyphen, so a plain
+    declarative like "Need-to-know basis applies here." or "Check-ins are
+    weekly now." must not be mistaken for an imperative ask just because it
+    starts with a hyphenated word whose prefix happens to be a verb in the
+    closed list."""
+    assert ask_placement("Need-to-know basis applies here.") is None
+    assert ask_placement("Check-ins are weekly now.") is None

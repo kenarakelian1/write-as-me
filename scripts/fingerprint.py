@@ -80,7 +80,7 @@ ASK = re.compile(
     re.IGNORECASE,
 )
 IMPERATIVE_START = re.compile(
-    r"^(send|check|confirm|review|let|call|ping|see|take|hold|drop|add|move|use|need)\b",
+    r"^(send|check|confirm|review|let|call|ping|see|take|hold|drop|add|move|use|need)\b(?!-)",
     re.IGNORECASE,
 )
 SIGNOFFS = [
