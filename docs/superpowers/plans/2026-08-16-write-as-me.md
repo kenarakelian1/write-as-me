@@ -804,7 +804,12 @@ import statistics
 from collections import Counter
 from pathlib import Path
 
-ABBREV = r"(?<!\bDr)(?<!\bMr)(?<!\bMrs)(?<!\bMs)(?<!\bSt)(?<!\bp\.m)(?<!\ba\.m)(?<!\be\.g)(?<!\bi\.e)"
+# Each lookbehind must include the trailing period: the split point sits AFTER
+# the ".", so "(?<!\bDr)" would inspect "r." and never fire.
+ABBREV = (
+    r"(?<!\bDr\.)(?<!\bMr\.)(?<!\bMrs\.)(?<!\bMs\.)(?<!\bSt\.)"
+    r"(?<!\bp\.m\.)(?<!\ba\.m\.)(?<!\be\.g\.)(?<!\bi\.e\.)"
+)
 SENTENCE_END = re.compile(ABBREV + r"(?<=[.!?])\s+(?=[A-Z0-9])")
 WORD = re.compile(r"[A-Za-z']+")
 
@@ -1030,13 +1035,23 @@ from fingerprint import lexicon  # add to the import block
 
 
 def test_lexicon_surfaces_distinctive_phrases():
+    """Every word in the sample must appear in the baseline except the
+    distinctive ones. An absent word scores near-infinite log-odds against the
+    smoothing floor, which would drown out the phrase under test."""
     baseline = {
-        "unigrams": {"the": 0.05, "a": 0.03, "worth": 0.0001, "look": 0.0002},
-        "bigrams": {"of the": 0.002, "worth a": 0.000001},
+        "unigrams": {
+            "the": 0.05, "a": 0.03, "at": 0.02, "numbers": 0.001,
+            "worth": 0.0000001, "look": 0.0000002,
+        },
+        "bigrams": {
+            "at the": 0.002, "the numbers": 0.001, "a look": 0.0009,
+            "look at": 0.002, "numbers worth": 0.0005,
+            "worth a": 0.0000001,
+        },
     }
     msgs = [{"body": "worth a look at the numbers"} for _ in range(10)]
-    phrases = [item["phrase"] for item in lexicon(msgs, baseline, top_n=5)]
-    assert "worth" in phrases or "worth a" in phrases
+    phrases = [item["phrase"] for item in lexicon(msgs, baseline, top_n=4)]
+    assert "worth" in phrases
     assert "the" not in phrases
 ```
 
@@ -1174,8 +1189,9 @@ def classify_register(msg: dict, user_domain: str) -> str:
 def aggregate(messages: list[dict], baseline: dict) -> dict:
     joined = "\n\n".join(m["body"] for m in messages)
     openers = Counter(opener_pattern(m["body"]) for m in messages)
-    closers = Counter(closer_pattern(m["body"])["signoff"] for m in messages)
-    name_forms = Counter(closer_pattern(m["body"])["name_form"] for m in messages)
+    closer_data = [closer_pattern(m["body"]) for m in messages]
+    closers = Counter(c["signoff"] for c in closer_data)
+    name_forms = Counter(c["name_form"] for c in closer_data)
     placements = [
         p for p in (ask_placement(m["body"]) for m in messages) if p is not None
     ]
@@ -1954,13 +1970,22 @@ def test_compare_returns_absolute_deltas():
     assert compare(a, b)["contraction_rate"] == pytest.approx(0.3)
 
 
-def test_verdict_passes_when_profile_is_closer_on_most_metrics():
+def test_verdict_fails_just_below_threshold():
+    """2 of 3 is a 0.667 share — under the 0.7 bar, so this must not pass."""
     profile = {"m1": 0.1, "m2": 0.1, "m3": 0.5}
     control = {"m1": 0.9, "m2": 0.9, "m3": 0.1}
     result = verdict(profile, control)
     assert result["metrics_compared"] == 3
     assert result["profile_closer"] == 2
-    assert result["pass"] is False  # 0.67 share, below the 0.7 bar
+    assert result["pass"] is False
+
+
+def test_verdict_passes_when_profile_wins_enough():
+    profile = {"m1": 0.1, "m2": 0.1, "m3": 0.1, "m4": 0.9}
+    control = {"m1": 0.9, "m2": 0.9, "m3": 0.9, "m4": 0.1}
+    result = verdict(profile, control)
+    assert result["share"] == 0.75
+    assert result["pass"] is True
 
 
 def test_verdict_fails_when_control_wins():
