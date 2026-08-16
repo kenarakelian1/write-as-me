@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from ingest import (  # noqa: E402
     dedupe,
+    load_eml_dir,
     normalize,
     strip_quoted,
     strip_signature,
@@ -115,10 +116,19 @@ def test_cli_end_to_end(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     data = json.loads(out.read_text(encoding="utf-8"))
+
+    # Ground truth: how many fixtures normalize successfully (2 auto-replies
+    # are dropped by normalize()), independent of the CLI subprocess.
+    normalized_count = len(
+        [r for r in (normalize(m, USER) for m in load_eml_dir(FIXTURES)) if r]
+    )
+
     assert data["stats"]["kept"] >= 12
-    assert data["stats"]["terse"] == 3
-    # Auto-replies dropped, near-duplicates collapsed
-    assert data["stats"]["kept"] + data["stats"]["terse"] < 40
+    assert data["stats"]["terse"] == 4
+    # dedupe() must actually fire: outreach_001/outreach_002 are a genuine
+    # templated pair (Jaccard > 0.85), so exactly one of them is collapsed.
+    assert data["stats"]["deduped"] == normalized_count - 1
+    assert data["stats"]["kept"] + data["stats"]["terse"] == data["stats"]["deduped"]
     for msg in data["messages"]:
         assert "wrote:" not in msg["body"]
         assert "Sent from my" not in msg["body"]

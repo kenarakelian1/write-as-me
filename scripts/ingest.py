@@ -181,7 +181,10 @@ def dedupe(messages: list[dict], threshold: float = 0.85) -> list[dict]:
     return [msg for msg, _ in kept]
 
 
-TERSE_WORD_LIMIT = 12
+# 15 is a domain judgment about what counts as a terse acknowledgement, not a
+# value fit to any particular fixture set. Do not retune it to match a
+# specific corpus's stats — genuine 12-14 word acks in real mail belong here.
+TERSE_WORD_LIMIT = 15
 
 
 def load_eml_dir(path: Path) -> list[EmailMessage]:
