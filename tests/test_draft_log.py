@@ -358,3 +358,38 @@ def test_match_cli_reports_status_and_candidates(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["status"] == "matched"
     assert len(payload["candidates"]) == 1
+
+
+def test_record_cli_requires_created(tmp_path):
+    """Without --created, find_match can never parse the draft's creation
+    time (Task 2's fix), so the draft would sit in the log permanently
+    unmatchable and silently teach nothing. Refuse to write it at all."""
+    root = Path(__file__).parent.parent
+    log = tmp_path / "drafts.jsonl"
+    body = tmp_path / "body.txt"
+    body.write_text("Body.", encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "draft_log.py"), "--record",
+         "--register", "client", "--recipients", "caden@example.com",
+         "--subject", "Listings", "--body-file", str(body),
+         "--log", str(log)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert not log.exists()
+
+
+def test_record_cli_requires_body_file(tmp_path):
+    """Without --body-file, the draft is recorded with an empty body, which
+    carries no content to diff against the sent version later. Refuse it."""
+    root = Path(__file__).parent.parent
+    log = tmp_path / "drafts.jsonl"
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "draft_log.py"), "--record",
+         "--register", "client", "--recipients", "caden@example.com",
+         "--subject", "Listings", "--created", CREATED,
+         "--log", str(log)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert not log.exists()

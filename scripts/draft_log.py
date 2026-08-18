@@ -240,7 +240,11 @@ def main() -> int:
         return 0
 
     if args.record:
-        body = Path(args.body_file).read_text(encoding="utf-8") if args.body_file else ""
+        if not args.created:
+            ap.error("--record requires --created")
+        if not args.body_file:
+            ap.error("--record requires --body-file")
+        body = Path(args.body_file).read_text(encoding="utf-8")
         recipients = [r.strip() for r in args.recipients.split(",") if r.strip()]
         draft_id = record_draft(
             args.register, recipients, args.subject, body,
