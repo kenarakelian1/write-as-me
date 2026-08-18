@@ -43,6 +43,10 @@ def record_edit(
     reviewed: str,
     path: Path = DEFAULT_LOG,
 ) -> None:
+    if not isinstance(draft_id, str) or not draft_id:
+        raise ValueError(
+            f"draft_id must be a non-empty string; got {draft_id!r}"
+        )
     for obs in observations:
         validate_observation(obs)
     record = {
@@ -61,12 +65,14 @@ def load_edits(path: Path = DEFAULT_LOG) -> list[dict]:
     if not path.exists():
         return []
     out = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            out.append(json.loads(line))
+            item = json.loads(line)
+            if isinstance(item, dict):
+                out.append(item)
         except json.JSONDecodeError:
             continue
     return out

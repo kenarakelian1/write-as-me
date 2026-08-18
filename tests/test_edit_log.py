@@ -103,3 +103,50 @@ def test_two_observations_from_the_same_draft_do_not_promote():
 
 def test_promotion_threshold_is_the_spec_value():
     assert PROMOTION_THRESHOLD == 2
+
+
+def test_bom_prefixed_log_loads_records(tmp_path):
+    """A UTF-8 BOM at the start of the file should not prevent loading."""
+    log = tmp_path / "edits.jsonl"
+    # Write a BOM-prefixed line with a valid record
+    with log.open("wb") as handle:
+        handle.write(b"\xef\xbb\xbf")  # UTF-8 BOM
+        handle.write('{"draft_id": "d-1", "observations": [{"dimension": "hedging", "direction": "reduce", "evidence": "test"}]}\n'.encode("utf-8"))
+    edits = load_edits(log)
+    assert len(edits) == 1
+    assert edits[0]["draft_id"] == "d-1"
+
+
+def test_load_edits_skips_non_dict_json(tmp_path):
+    """Non-dict JSON (scalars, arrays, null) should be skipped; only dicts are returned."""
+    log = tmp_path / "edits.jsonl"
+    with log.open("w", encoding="utf-8") as handle:
+        handle.write('42\n')
+        handle.write('"string"\n')
+        handle.write('null\n')
+        handle.write('[1, 2, 3]\n')
+        handle.write('{"draft_id": "d-1", "observations": [{"dimension": "hedging", "direction": "reduce", "evidence": "valid"}]}\n')
+        handle.write('{"draft_id": "d-2", "observations": [{"dimension": "hedging", "direction": "reduce", "evidence": "valid2"}]}\n')
+    edits = load_edits(log)
+    # Only the two dicts should be returned
+    assert len(edits) == 2
+    assert all(isinstance(e, dict) for e in edits)
+    # promotable should work without crashing on non-dict entries
+    result = promotable(edits)
+    assert len(result) == 1
+
+
+def test_record_edit_rejects_missing_draft_id(tmp_path):
+    """record_edit should reject missing draft_id and write nothing."""
+    log = tmp_path / "edits.jsonl"
+    with pytest.raises(ValueError):
+        record_edit("", "edited", [obs()], [], reviewed=REVIEWED, path=log)
+    assert load_edits(log) == []
+
+
+def test_record_edit_rejects_non_string_draft_id(tmp_path):
+    """record_edit should reject non-string draft_id and write nothing."""
+    log = tmp_path / "edits.jsonl"
+    with pytest.raises(ValueError):
+        record_edit(None, "edited", [obs()], [], reviewed=REVIEWED, path=log)  # type: ignore
+    assert load_edits(log) == []
