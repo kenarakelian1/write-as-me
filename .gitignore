@@ -14,6 +14,8 @@ raw.json
 holdout.json
 drafts.json
 control.json
+drafts.jsonl
+edits.jsonl
 
 # Orchestration scratch
 .superpowers/

@@ -2,6 +2,7 @@
 one becomes a profile directive."""
 from __future__ import annotations
 
+import argparse
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -114,3 +115,43 @@ def promotable(edits: list[dict], threshold: int = PROMOTION_THRESHOLD) -> list[
                 "evidence": evidence_by_pair[(dimension, direction)],
             })
     return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Record edits and check promotions.")
+    ap.add_argument("--record", action="store_true")
+    ap.add_argument("--promotable", action="store_true")
+    ap.add_argument("--draft-id", default="")
+    ap.add_argument("--classification", default="edited")
+    ap.add_argument("--reviewed", default="")
+    ap.add_argument("--observations-file")
+    ap.add_argument("--factual-file")
+    ap.add_argument("--log", default=str(DEFAULT_LOG))
+    args = ap.parse_args()
+
+    log = Path(args.log)
+
+    if args.record:
+        def read_list(path: str | None) -> list:
+            if not path:
+                return []
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+
+        record_edit(
+            args.draft_id, args.classification,
+            read_list(args.observations_file), read_list(args.factual_file),
+            reviewed=args.reviewed, path=log,
+        )
+        print(f"recorded {args.classification} for {args.draft_id}")
+        return 0
+
+    if args.promotable:
+        print(json.dumps(promotable(load_edits(log)), indent=2))
+        return 0
+
+    ap.error("nothing to do: pass --record or --promotable")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

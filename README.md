@@ -73,6 +73,41 @@ in the profile, while preserving your own first name and the rhythm of the
 original text. A corpus under 12 usable messages is refused outright,
 rather than producing a profile built on too little signal.
 
+## Learning from your edits
+
+Write mode is not the end of the loop. Every draft wam produces is recorded,
+so the next time you invoke `/write-as-me` or `/wam`, it can check whether
+that draft was sent and, if you edited it before sending, learn from the
+difference.
+
+Review mode (`/wam review`) finds the sent version by searching your sent
+mail for the draft's subject, narrowed to messages sent after the draft was
+created and addressed to one of its recipients. When more than one message
+could plausibly be the one you sent, it shows you the candidates and asks
+which one — it never guesses, because learning from the wrong message would
+teach the profile from someone else's writing.
+
+Only style edits update the profile. A wording change, a cut hedge, a
+trimmed sentence, a different opener or signoff — these get recorded as
+observations. A factual correction — a fixed date, a corrected figure, a
+changed name — never does, because the profile describes how you write, not
+what you know.
+
+No single edit changes the profile. A dimension needs two independent
+edits, from two separate drafts, pointing the same way before wam proposes
+anything, and every proposal is shown and approved one at a time — never a
+batch "yes to all." Once a change is approved, the line it adds to
+`~/.claude/wam/default.md` is tagged with its provenance (e.g. "learned from
+2 edits, 2026-08-18") so you can always tell a learned line from one
+measured off the full corpus, and strip the learned ones if the loop ever
+drifts.
+
+Privacy for this loop works the same way as the rest of wam:
+`~/.claude/wam/drafts.jsonl` holds the full text of the drafts wam produced,
+kept for 30 days and then dropped automatically. The sent messages fetched
+for comparison are never written to disk — they exist only for the length of
+the review and are discarded afterward.
+
 ## Privacy
 
 Your generated profile contains excerpts of your real email, redacted but

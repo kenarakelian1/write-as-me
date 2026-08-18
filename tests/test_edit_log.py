@@ -150,3 +150,36 @@ def test_record_edit_rejects_non_string_draft_id(tmp_path):
     with pytest.raises(ValueError):
         record_edit(None, "edited", [obs()], [], reviewed=REVIEWED, path=log)  # type: ignore
     assert load_edits(log) == []
+
+
+import json
+import subprocess
+
+
+def test_record_and_promotable_cli(tmp_path):
+    root = Path(__file__).parent.parent
+    log = tmp_path / "edits.jsonl"
+    obs_file = tmp_path / "obs.json"
+    obs_file.write_text(json.dumps([obs(evidence="cut: 'Happy to jump on a call'")]),
+                        encoding="utf-8")
+
+    for draft_id in ("d-1", "d-2"):
+        result = subprocess.run(
+            [sys.executable, str(root / "scripts" / "edit_log.py"), "--record",
+             "--draft-id", draft_id, "--classification", "edited",
+             "--reviewed", REVIEWED, "--observations-file", str(obs_file),
+             "--log", str(log)],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "edit_log.py"), "--promotable",
+         "--log", str(log)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    promoted = json.loads(result.stdout)
+    assert len(promoted) == 1
+    assert promoted[0]["dimension"] == "hedging"
+    assert promoted[0]["count"] == 2

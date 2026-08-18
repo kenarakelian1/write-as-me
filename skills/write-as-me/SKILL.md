@@ -403,3 +403,126 @@ disambiguate with.
 
 Logging is best-effort: if it fails, say so in one line and move on. A failed
 log must never cost the user the draft they asked for.
+
+## Review mode
+
+Triggered by `/wam review`, or by the user accepting the pending-edit offer.
+
+If `~/.claude/wam/default.md` does not exist, there is nothing to update — say
+so and offer analyze mode instead.
+
+### Step 1 — Find the sent versions
+
+List pending drafts:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --list-pending --now "<ISO-8601 NOW>"
+```
+
+For each, search `in:sent` for its subject, restricted to messages sent after
+the draft's `created` timestamp and addressed to one of its recipients. Build
+each candidate as `{"subject", "body", "recipients", "date"}`, write the draft
+record and the candidate list to temp files, and let the matcher decide — do not
+decide by eye:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --match   --draft-file <DRAFT JSON> --candidates-file <CANDIDATES JSON>
+```
+
+It prints `{"status": ..., "candidates": [...]}` where status is `matched`,
+`ambiguous`, or `none`.
+
+- `matched` — proceed.
+- `ambiguous` — show the user the candidate subjects and dates and ask which,
+  if any. Never pick one yourself: learning from the wrong message teaches the
+  profile from someone else's writing.
+- `none` — leave it `pending`. It expires on its own at 30 days. Say nothing.
+
+### Step 2 — Measure the change
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/diff_draft.py \
+  --draft <DRAFT FILE> --sent <SENT FILE> \
+  --baseline ${CLAUDE_PLUGIN_ROOT}/fixtures/baseline_ngrams.json \
+  --out <DIFF FILE>
+```
+
+If `classification` is `rewritten`, record it and derive nothing:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/edit_log.py --record \
+  --draft-id <ID> --classification rewritten --reviewed "<ISO-8601 NOW>"
+```
+
+Then tell the user plainly that they replaced rather than edited that draft, and
+that a run of rewrites means the profile is wrong at the root — re-running
+analyze mode will serve them better than incremental learning.
+
+### Step 3 — Classify every change
+
+Read the diff file. For each removed sentence, added sentence, changed pair, and
+non-trivial metric delta, decide which of three buckets it belongs in:
+
+- **Factual** — a number, name, date, link, or fact changed, or content added
+  that you could not have known. Record it in `factual_changes`. **It never
+  becomes a profile directive.** The profile describes how the user writes, not
+  what they know.
+- **Voice** — a hedge removed, a sentence cut with no loss of information, an
+  opener or signoff changed, a length cut, a structural change.
+- **Neutral** — typo fixes, whitespace, reformatting. Ignore.
+
+A single change can be both: "the vendor contract goes out on the 15th" →
+"on the 18th" is factual only, while "I just wanted to flag that staging is
+still on the old config" → "Staging is still on the old config" is voice only.
+Judge them separately.
+
+### Step 4 — Record observations
+
+Each voice change becomes one observation with a dimension from the closed
+vocabulary — `length`, `hedging`, `opener`, `signoff`, `ask_placement`,
+`structure`, `punctuation`, `contractions`, `formality`, `closing_offer` — a
+direction of `reduce`, `increase`, or `replace:<value>`, and **verbatim
+evidence**. Paraphrased evidence is worthless later: the whole point is showing
+the user the actual sentence they cut.
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/edit_log.py --record \
+  --draft-id <ID> --classification edited --reviewed "<ISO-8601 NOW>" \
+  --observations-file <JSON FILE> --factual-file <JSON FILE>
+```
+
+The recorder rejects a dimension outside the vocabulary. That is deliberate:
+free-text labels would never match each other and nothing would ever promote.
+If a change genuinely does not fit any dimension, drop it rather than inventing
+a label.
+
+### Step 5 — Propose what has earned promotion
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/edit_log.py --promotable
+```
+
+This returns only dimensions with two or more observations from **separate
+drafts** pointing the same way. Present each one on its own:
+
+- State the proposed profile line.
+- Show **both** pieces of verbatim evidence.
+- If it contradicts a directive the profile measured from the corpus, say so
+  and show both figures. Two edits do not silently overrule sixteen emails.
+- Ask. One approval per change — never a batch yes.
+
+### Step 6 — Apply approved changes
+
+Edit `~/.claude/wam/default.md`, tagging every learned line with provenance:
+
+```markdown
+- Cut the closing offer sentence; you delete it. (learned from 2 edits, 2026-08-18)
+```
+
+Provenance is required. A directive resting on two edits is weaker evidence than
+one resting on the whole corpus, and the profile must not present them as equal.
+The tag also lets the user strip learned lines wholesale if the loop drifts.
+
+Then mark each reviewed draft `matched`, and report: how many drafts were
+reviewed, how many changes were factual, how many observations were recorded,
+and how many are still short of promotion.
