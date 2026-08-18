@@ -1,0 +1,1673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Edit-Learning Loop Implementation Plan</title>
+<style>
+:root {
+  --ink: #1a1a1a; --muted: #5c5c5c; --rule: #e0ddd6;
+  --bg: #fdfcfa; --accent: #7a3e2f; --code-bg: #f4f2ed;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #e8e6e1; --muted: #a8a49c; --rule: #35322c;
+    --bg: #16151300; --bg: #161513; --accent: #d99a7f; --code-bg: #211f1c;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 4rem 1.5rem 8rem;
+  background: var(--bg); color: var(--ink);
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-size: 18px; line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+main { max-width: 44rem; margin: 0 auto; }
+h1, h2, h3, h4 {
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  line-height: 1.25; font-weight: 600; margin: 2.5em 0 0.6em;
+}
+h1 { font-size: 2.1rem; margin-top: 0; letter-spacing: -0.02em; }
+h2 { font-size: 1.4rem; padding-bottom: 0.3em; border-bottom: 1px solid var(--rule); }
+h3 { font-size: 1.12rem; }
+h4 { font-size: 1rem; color: var(--muted); }
+p, ul, ol { margin: 0 0 1.15em; }
+li { margin-bottom: 0.35em; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+hr { border: 0; border-top: 1px solid var(--rule); margin: 3em 0; }
+blockquote {
+  margin: 0 0 1.15em; padding-left: 1.2em;
+  border-left: 3px solid var(--rule); color: var(--muted);
+}
+code {
+  font-family: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  font-size: 0.85em; background: var(--code-bg);
+  padding: 0.15em 0.4em; border-radius: 3px;
+}
+pre {
+  background: var(--code-bg); padding: 1.1em 1.3em; border-radius: 6px;
+  overflow-x: auto; font-size: 0.85rem; line-height: 1.5;
+  border: 1px solid var(--rule);
+}
+pre code { background: none; padding: 0; font-size: 1em; }
+table {
+  width: 100%; border-collapse: collapse; margin: 0 0 1.5em;
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif; font-size: 0.9rem;
+}
+th, td { text-align: left; padding: 0.55em 0.8em; border-bottom: 1px solid var(--rule); }
+th { font-weight: 600; border-bottom-width: 2px; }
+.mermaid { margin: 2em 0; text-align: center; }
+@media print {
+  body { background: #fff; color: #000; font-size: 11pt; padding: 0; }
+  h2 { page-break-after: avoid; }
+  pre, table, blockquote { page-break-inside: avoid; }
+  a { color: #000; text-decoration: none; }
+}
+</style>
+</head>
+<body>
+<main>
+<h1>Edit-Learning Loop Implementation Plan</h1>
+<blockquote>
+<p><strong>For agentic workers:</strong> REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (<code>- [ ]</code>) syntax for tracking.</p>
+</blockquote>
+<p><strong>Goal:</strong> Let write-as-me learn from the edits a user makes before sending a draft, and propose profile changes once a pattern repeats.</p>
+<p><strong>Architecture:</strong> Write mode appends every draft it presents to <code>~/.claude/wam/drafts.jsonl</code>. Review mode finds the sent version in Gmail, measures the difference deterministically in Python, and hands a compact delta to the model, which separates voice edits from factual corrections and records observations to <code>~/.claude/wam/edits.jsonl</code>. A profile change is proposed only when two observations share a dimension and a direction.</p>
+<p><strong>Tech Stack:</strong> Python 3.9+ (stdlib: <code>json</code>, <code>difflib</code>, <code>hashlib</code>, <code>datetime</code>, <code>argparse</code>), pytest for dev-time tests, Markdown skill definitions.</p>
+<p><strong>Spec:</strong> <code>docs/superpowers/specs/2026-08-18-edit-learning-design.md</code></p>
+<h2>Global Constraints</h2>
+<ul>
+<li><strong>Runtime dependencies: none.</strong> Python standard library only. pytest is dev-only.</li>
+<li><strong>Python floor: 3.9.</strong> Every module starts with <code>from __future__ import annotations</code>.</li>
+<li><strong>Explicit UTF-8 everywhere.</strong> Every <code>open()</code>, <code>read_text()</code>, <code>write_text()</code> passes <code>encoding=&quot;utf-8&quot;</code>. Windows defaults to cp1252.</li>
+<li><strong>No network calls</strong> in any script under <code>scripts/</code>. Gmail access happens in the skill layer, never in Python.</li>
+<li><strong>State lives in <code>~/.claude/wam/</code></strong>, never in a repository.</li>
+<li><strong>Retention: 30 days.</strong> Draft records older than that are dropped on the next review run.</li>
+<li><strong>Match threshold: 0.5</strong> shingle Jaccard. <strong>Rewrite threshold: 0.25.</strong> <strong>Promotion threshold: 2</strong> observations sharing a dimension and direction.</li>
+<li><strong><code>dimension</code> is a closed vocabulary</strong> — exactly <code>length</code>, <code>hedging</code>, <code>opener</code>, <code>signoff</code>, <code>ask_placement</code>, <code>structure</code>, <code>punctuation</code>, <code>contractions</code>, <code>formality</code>, <code>closing_offer</code>. Never extended at runtime.</li>
+<li><strong><code>direction</code></strong> is <code>reduce</code>, <code>increase</code>, or <code>replace:&lt;value&gt;</code>.</li>
+<li><strong>The fetched sent body never touches disk.</strong> Only derived observations persist.</li>
+<li>Commit after every task. Never commit anything under <code>emails/</code>, <code>*.mbox</code>, <code>*.eml</code>.</li>
+</ul>
+<hr />
+<h2>File Structure</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Responsibility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>scripts/draft_log.py</code></td>
+<td><code>drafts.jsonl</code> lifecycle: append, load, expire, status — and matching a draft to candidate sent messages</td>
+</tr>
+<tr>
+<td><code>scripts/diff_draft.py</code></td>
+<td>Measure draft vs. sent: structural deltas, metric deltas, sentence diff</td>
+</tr>
+<tr>
+<td><code>scripts/edit_log.py</code></td>
+<td><code>edits.jsonl</code>: validated observations and the promotion rule</td>
+</tr>
+<tr>
+<td><code>skills/write-as-me/SKILL.md</code></td>
+<td>Write mode logs drafts; new review mode; profile updates with provenance</td>
+</tr>
+<tr>
+<td><code>fixtures/edit_pairs/</code></td>
+<td>Synthetic draft/sent pair with known deltas</td>
+</tr>
+<tr>
+<td><code>tests/test_draft_log.py</code>, <code>tests/test_diff_draft.py</code>, <code>tests/test_edit_log.py</code></td>
+<td>pytest suites</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Task 1: <code>draft_log.py</code> — record, load, expire</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>scripts/draft_log.py</code></li>
+<li>Test: <code>tests/test_draft_log.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>
+<p>Consumes: nothing.</p>
+</li>
+<li>
+<p>Produces:</p>
+<ul>
+<li><code>DEFAULT_LOG: Path</code> — <code>Path.home() / &quot;.claude&quot; / &quot;wam&quot; / &quot;drafts.jsonl&quot;</code></li>
+<li><code>RETENTION_DAYS: int = 30</code></li>
+<li><code>make_id(created: str, subject: str) -&gt; str</code> → <code>&quot;d-YYYYMMDD-xxxx&quot;</code></li>
+<li><code>record_draft(register: str, recipients: list[str], subject: str, body: str, *, created: str, path: Path) -&gt; str</code> (returns the id)</li>
+<li><code>load_drafts(path: Path) -&gt; list[dict]</code> (skips corrupt lines)</li>
+<li><code>set_status(draft_id: str, status: str, *, path: Path) -&gt; None</code></li>
+<li><code>expire_old(drafts: list[dict], now: str, retention_days: int = RETENTION_DAYS) -&gt; list[dict]</code></li>
+<li><code>pending(drafts: list[dict]) -&gt; list[dict]</code></li>
+<li>Draft record schema: <code>{&quot;id&quot;: str, &quot;created&quot;: str, &quot;register&quot;: str, &quot;recipients&quot;: list[str], &quot;subject&quot;: str, &quot;body&quot;: str, &quot;status&quot;: str}</code> where status is one of <code>pending</code>, <code>matched</code>, <code>expired</code>, <code>ambiguous</code>.</li>
+</ul>
+</li>
+<li>
+<p>[ ] <strong>Step 1: Write the failing tests</strong></p>
+</li>
+</ul>
+<pre><code class="language-python"># tests/test_draft_log.py
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / &quot;scripts&quot;))
+
+from draft_log import (  # noqa: E402
+    expire_old,
+    load_drafts,
+    make_id,
+    pending,
+    record_draft,
+    set_status,
+)
+
+CREATED = &quot;2026-08-18T14:02:11-04:00&quot;
+
+
+def test_make_id_is_deterministic_and_dated():
+    a = make_id(CREATED, &quot;Listings - what changes&quot;)
+    b = make_id(CREATED, &quot;Listings - what changes&quot;)
+    assert a == b
+    assert a.startswith(&quot;d-20260818-&quot;)
+    assert len(a) == len(&quot;d-20260818-&quot;) + 4
+
+
+def test_make_id_differs_by_subject():
+    assert make_id(CREATED, &quot;one&quot;) != make_id(CREATED, &quot;two&quot;)
+
+
+def test_record_and_load_round_trip(tmp_path):
+    log = tmp_path / &quot;drafts.jsonl&quot;
+    draft_id = record_draft(
+        &quot;client&quot;, [&quot;caden@example.com&quot;], &quot;Listings&quot;, &quot;Caden,\n\nBody.&quot;,
+        created=CREATED, path=log,
+    )
+    drafts = load_drafts(log)
+    assert len(drafts) == 1
+    assert drafts[0][&quot;id&quot;] == draft_id
+    assert drafts[0][&quot;status&quot;] == &quot;pending&quot;
+    assert drafts[0][&quot;recipients&quot;] == [&quot;caden@example.com&quot;]
+    assert drafts[0][&quot;body&quot;] == &quot;Caden,\n\nBody.&quot;
+
+
+def test_load_missing_file_is_empty_not_an_error(tmp_path):
+    assert load_drafts(tmp_path / &quot;nope.jsonl&quot;) == []
+
+
+def test_load_skips_corrupt_lines(tmp_path):
+    log = tmp_path / &quot;drafts.jsonl&quot;
+    good = json.dumps({&quot;id&quot;: &quot;d-1&quot;, &quot;created&quot;: CREATED, &quot;register&quot;: &quot;client&quot;,
+                       &quot;recipients&quot;: [], &quot;subject&quot;: &quot;s&quot;, &quot;body&quot;: &quot;b&quot;,
+                       &quot;status&quot;: &quot;pending&quot;})
+    log.write_text(good + &quot;\nnot json at all\n&quot; + good + &quot;\n&quot;, encoding=&quot;utf-8&quot;)
+    assert len(load_drafts(log)) == 2
+
+
+def test_set_status_rewrites_one_entry(tmp_path):
+    log = tmp_path / &quot;drafts.jsonl&quot;
+    first = record_draft(&quot;client&quot;, [], &quot;one&quot;, &quot;b&quot;, created=CREATED, path=log)
+    second = record_draft(&quot;client&quot;, [], &quot;two&quot;, &quot;b&quot;, created=CREATED, path=log)
+    set_status(second, &quot;matched&quot;, path=log)
+    by_id = {d[&quot;id&quot;]: d for d in load_drafts(log)}
+    assert by_id[second][&quot;status&quot;] == &quot;matched&quot;
+    assert by_id[first][&quot;status&quot;] == &quot;pending&quot;
+
+
+def test_expire_old_drops_entries_past_retention():
+    drafts = [
+        {&quot;id&quot;: &quot;old&quot;, &quot;created&quot;: &quot;2026-07-01T00:00:00-04:00&quot;, &quot;status&quot;: &quot;pending&quot;},
+        {&quot;id&quot;: &quot;new&quot;, &quot;created&quot;: &quot;2026-08-17T00:00:00-04:00&quot;, &quot;status&quot;: &quot;pending&quot;},
+    ]
+    kept = expire_old(drafts, &quot;2026-08-18T00:00:00-04:00&quot;)
+    assert [d[&quot;id&quot;] for d in kept] == [&quot;new&quot;]
+
+
+def test_expire_old_ignores_unparseable_dates():
+    drafts = [{&quot;id&quot;: &quot;weird&quot;, &quot;created&quot;: &quot;&quot;, &quot;status&quot;: &quot;pending&quot;}]
+    assert expire_old(drafts, &quot;2026-08-18T00:00:00-04:00&quot;) == []
+
+
+def test_pending_filters_by_status():
+    drafts = [{&quot;id&quot;: &quot;a&quot;, &quot;status&quot;: &quot;pending&quot;}, {&quot;id&quot;: &quot;b&quot;, &quot;status&quot;: &quot;matched&quot;}]
+    assert [d[&quot;id&quot;] for d in pending(drafts)] == [&quot;a&quot;]
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: Run to verify they fail</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_draft_log.py -v</code>
+Expected: FAIL — <code>ModuleNotFoundError: No module named 'draft_log'</code></p>
+<ul>
+<li>[ ] <strong>Step 3: Implement</strong></li>
+</ul>
+<pre><code class="language-python"># scripts/draft_log.py
+&quot;&quot;&quot;Record of the drafts write-as-me produced, so review mode can find them later.&quot;&quot;&quot;
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import datetime, timedelta
+from pathlib import Path
+
+DEFAULT_LOG = Path.home() / &quot;.claude&quot; / &quot;wam&quot; / &quot;drafts.jsonl&quot;
+RETENTION_DAYS = 30
+STATUSES = (&quot;pending&quot;, &quot;matched&quot;, &quot;expired&quot;, &quot;ambiguous&quot;)
+
+
+def _parse(stamp: str) -&gt; datetime | None:
+    try:
+        return datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return None
+
+
+def make_id(created: str, subject: str) -&gt; str:
+    &quot;&quot;&quot;Stable id from the draft's own content, so the same draft never
+    produces two records and tests do not need a clock or a random source.&quot;&quot;&quot;
+    digest = hashlib.sha1(f&quot;{created}|{subject}&quot;.encode(&quot;utf-8&quot;)).hexdigest()[:4]
+    parsed = _parse(created)
+    day = parsed.strftime(&quot;%Y%m%d&quot;) if parsed else &quot;00000000&quot;
+    return f&quot;d-{day}-{digest}&quot;
+
+
+def record_draft(
+    register: str,
+    recipients: list[str],
+    subject: str,
+    body: str,
+    *,
+    created: str,
+    path: Path = DEFAULT_LOG,
+) -&gt; str:
+    draft_id = make_id(created, subject)
+    record = {
+        &quot;id&quot;: draft_id,
+        &quot;created&quot;: created,
+        &quot;register&quot;: register,
+        &quot;recipients&quot;: list(recipients),
+        &quot;subject&quot;: subject,
+        &quot;body&quot;: body,
+        &quot;status&quot;: &quot;pending&quot;,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open(&quot;a&quot;, encoding=&quot;utf-8&quot;) as handle:
+        handle.write(json.dumps(record) + &quot;\n&quot;)
+    return draft_id
+
+
+def load_drafts(path: Path = DEFAULT_LOG) -&gt; list[dict]:
+    &quot;&quot;&quot;Corrupt lines are skipped, never raised — a damaged log must not take
+    write mode down with it.&quot;&quot;&quot;
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text(encoding=&quot;utf-8&quot;).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _rewrite(drafts: list[dict], path: Path) -&gt; None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        &quot;&quot;.join(json.dumps(d) + &quot;\n&quot; for d in drafts), encoding=&quot;utf-8&quot;
+    )
+
+
+def set_status(draft_id: str, status: str, *, path: Path = DEFAULT_LOG) -&gt; None:
+    if status not in STATUSES:
+        raise ValueError(f&quot;unknown status {status!r}; expected one of {STATUSES}&quot;)
+    drafts = load_drafts(path)
+    for draft in drafts:
+        if draft.get(&quot;id&quot;) == draft_id:
+            draft[&quot;status&quot;] = status
+    _rewrite(drafts, path)
+
+
+def expire_old(
+    drafts: list[dict], now: str, retention_days: int = RETENTION_DAYS
+) -&gt; list[dict]:
+    &quot;&quot;&quot;Drop records past retention. A draft with an unparseable date is dropped
+    too: it can never be matched on a time window, so keeping it only leaves
+    real draft bodies on disk indefinitely.&quot;&quot;&quot;
+    current = _parse(now)
+    if current is None:
+        return list(drafts)
+    cutoff = current - timedelta(days=retention_days)
+    kept = []
+    for draft in drafts:
+        created = _parse(draft.get(&quot;created&quot;, &quot;&quot;))
+        if created is not None and created &gt;= cutoff:
+            kept.append(draft)
+    return kept
+
+
+def pending(drafts: list[dict]) -&gt; list[dict]:
+    return [d for d in drafts if d.get(&quot;status&quot;) == &quot;pending&quot;]
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: Run to verify they pass</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_draft_log.py -v</code>
+Expected: 9 passed.</p>
+<ul>
+<li>[ ] <strong>Step 5: Run the whole suite</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/ -q</code>
+Expected: all pass, no regressions.</p>
+<ul>
+<li>[ ] <strong>Step 6: Commit</strong></li>
+</ul>
+<pre><code class="language-bash">git add scripts/draft_log.py tests/test_draft_log.py
+git commit -m &quot;feat: draft log with retention and corrupt-line tolerance&quot;
+</code></pre>
+<hr />
+<h2>Task 2: <code>draft_log.py</code> — matching a draft to its sent message</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>scripts/draft_log.py</code></li>
+<li>Modify: <code>scripts/ingest.py</code> (make <code>_shingles</code> public as <code>shingles</code>, keep the old name as an alias)</li>
+<li>Modify: <code>tests/test_draft_log.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>
+<p>Consumes: <code>load_drafts</code>, draft record schema from Task 1.</p>
+</li>
+<li>
+<p>Produces:</p>
+<ul>
+<li><code>ingest.shingles(text: str, size: int = 5) -&gt; set[str]</code> (public; <code>_shingles</code> remains as an alias so nothing that imported it breaks)</li>
+<li><code>similarity(a: str, b: str) -&gt; float</code> — shingle Jaccard, 0.0 when either side is empty</li>
+<li><code>MATCH_THRESHOLD = 0.5</code>, <code>REWRITE_THRESHOLD = 0.25</code></li>
+<li><code>find_match(draft: dict, sent: list[dict]) -&gt; tuple[str, list[dict]]</code> returning <code>(&quot;matched&quot;, [one])</code>, <code>(&quot;ambiguous&quot;, [two or more])</code>, or <code>(&quot;none&quot;, [])</code></li>
+<li>Sent-message dicts passed in are shaped <code>{&quot;subject&quot;: str, &quot;body&quot;: str, &quot;recipients&quot;: list[str], &quot;date&quot;: str}</code> — the skill layer builds these from Gmail results.</li>
+</ul>
+</li>
+<li>
+<p>[ ] <strong>Step 1: Make <code>shingles</code> public in <code>ingest.py</code></strong></p>
+</li>
+</ul>
+<p>Change the definition and add a backward-compatible alias:</p>
+<pre><code class="language-python">def shingles(text: str, size: int = 5) -&gt; set[str]:
+    words = re.findall(r&quot;[a-z']+&quot;, text.lower())
+    if len(words) &lt; size:
+        return {&quot; &quot;.join(words)}
+    return {&quot; &quot;.join(words[i : i + size]) for i in range(len(words) - size + 1)}
+
+
+# Historical name, kept so existing imports keep working.
+_shingles = shingles
+</code></pre>
+<p>Replace the body of the old <code>_shingles</code> with this. Every existing call site keeps working through the alias.</p>
+<ul>
+<li>[ ] <strong>Step 2: Run the existing suite to confirm nothing broke</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/ -q</code>
+Expected: all pass. If <code>test_ingest.py</code> fails on dedupe, the rename dropped behaviour — the two functions must be identical.</p>
+<ul>
+<li>[ ] <strong>Step 3: Write the failing matching tests</strong></li>
+</ul>
+<p>Append to <code>tests/test_draft_log.py</code>:</p>
+<pre><code class="language-python">from draft_log import (  # noqa: E402
+    MATCH_THRESHOLD,
+    REWRITE_THRESHOLD,
+    find_match,
+    similarity,
+)
+
+DRAFT = {
+    &quot;id&quot;: &quot;d-1&quot;,
+    &quot;created&quot;: &quot;2026-08-18T09:00:00-04:00&quot;,
+    &quot;recipients&quot;: [&quot;caden@example.com&quot;],
+    &quot;subject&quot;: &quot;Listings - what changes&quot;,
+    &quot;body&quot;: &quot;Caden,\n\nI am narrowing what I do on directory listings. &quot;
+            &quot;Monthly I check each property and send you what is wrong.&quot;,
+}
+
+
+def _sent(subject, body, recipients=(&quot;caden@example.com&quot;,),
+          date=&quot;2026-08-18T10:00:00-04:00&quot;):
+    return {&quot;subject&quot;: subject, &quot;body&quot;: body,
+            &quot;recipients&quot;: list(recipients), &quot;date&quot;: date}
+
+
+def test_similarity_is_one_for_identical_text():
+    assert similarity(&quot;a b c d e f&quot;, &quot;a b c d e f&quot;) == 1.0
+
+
+def test_similarity_is_zero_when_either_side_is_empty():
+    assert similarity(&quot;&quot;, &quot;a b c d e f&quot;) == 0.0
+
+
+def test_exact_subject_and_recipient_matches():
+    sent = [_sent(&quot;Listings - what changes&quot;, DRAFT[&quot;body&quot;])]
+    status, hits = find_match(DRAFT, sent)
+    assert status == &quot;matched&quot;
+    assert hits[0][&quot;subject&quot;] == &quot;Listings - what changes&quot;
+
+
+def test_message_sent_before_the_draft_is_not_a_candidate():
+    sent = [_sent(&quot;Listings - what changes&quot;, DRAFT[&quot;body&quot;],
+                  date=&quot;2026-08-17T10:00:00-04:00&quot;)]
+    assert find_match(DRAFT, sent)[0] == &quot;none&quot;
+
+
+def test_message_to_a_different_recipient_is_not_a_candidate():
+    sent = [_sent(&quot;Listings - what changes&quot;, DRAFT[&quot;body&quot;],
+                  recipients=(&quot;someone-else@example.com&quot;,))]
+    assert find_match(DRAFT, sent)[0] == &quot;none&quot;
+
+
+def test_edited_subject_falls_back_to_body_similarity():
+    sent = [_sent(&quot;Listings update&quot;, DRAFT[&quot;body&quot;] + &quot; One more line here.&quot;)]
+    status, hits = find_match(DRAFT, sent)
+    assert status == &quot;matched&quot;
+    assert hits[0][&quot;subject&quot;] == &quot;Listings update&quot;
+
+
+def test_unrelated_body_with_edited_subject_is_not_a_match():
+    sent = [_sent(&quot;Something else&quot;, &quot;Totally unrelated text about lunch plans.&quot;)]
+    assert find_match(DRAFT, sent)[0] == &quot;none&quot;
+
+
+def test_two_candidates_are_ambiguous_not_a_guess():
+    sent = [
+        _sent(&quot;Listings - what changes&quot;, DRAFT[&quot;body&quot;]),
+        _sent(&quot;Listings - what changes&quot;, DRAFT[&quot;body&quot;] + &quot; extra&quot;),
+    ]
+    status, hits = find_match(DRAFT, sent)
+    assert status == &quot;ambiguous&quot;
+    assert len(hits) == 2
+
+
+def test_draft_with_no_recipient_requires_an_exact_subject():
+    &quot;&quot;&quot;Without a recipient the shingle fallback loses its disambiguation, so
+    only an exact subject is safe.&quot;&quot;&quot;
+    draft = {**DRAFT, &quot;recipients&quot;: []}
+    assert find_match(draft, [_sent(&quot;Listings update&quot;, DRAFT[&quot;body&quot;],
+                                    recipients=())])[0] == &quot;none&quot;
+    assert find_match(draft, [_sent(&quot;Listings - what changes&quot;, DRAFT[&quot;body&quot;],
+                                    recipients=())])[0] == &quot;matched&quot;
+
+
+def test_thresholds_are_the_spec_values():
+    assert MATCH_THRESHOLD == 0.5
+    assert REWRITE_THRESHOLD == 0.25
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: Run to verify failure</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_draft_log.py -v -k &quot;match or similarity or threshold&quot;</code>
+Expected: FAIL — <code>ImportError: cannot import name 'find_match'</code></p>
+<ul>
+<li>[ ] <strong>Step 5: Implement matching</strong></li>
+</ul>
+<p>Add to <code>scripts/draft_log.py</code>:</p>
+<pre><code class="language-python">import sys
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from ingest import shingles  # noqa: E402
+
+MATCH_THRESHOLD = 0.5
+REWRITE_THRESHOLD = 0.25
+
+
+def similarity(a: str, b: str) -&gt; float:
+    &quot;&quot;&quot;Shingle Jaccard, the same measure dedupe() uses.&quot;&quot;&quot;
+    if not a.strip() or not b.strip():
+        return 0.0
+    left, right = shingles(a), shingles(b)
+    union = left | right
+    return len(left &amp; right) / len(union) if union else 0.0
+
+
+def find_match(draft: dict, sent: list[dict]) -&gt; tuple[str, list[dict]]:
+    &quot;&quot;&quot;Find the sent message a draft became.
+
+    Fails closed: two plausible candidates return &quot;ambiguous&quot; rather than a
+    guess, because learning from the wrong message teaches the profile from
+    someone else's writing.
+    &quot;&quot;&quot;
+    created = _parse(draft.get(&quot;created&quot;, &quot;&quot;))
+    recipients = {r.lower() for r in draft.get(&quot;recipients&quot;) or []}
+    subject = (draft.get(&quot;subject&quot;) or &quot;&quot;).strip()
+
+    window = []
+    for message in sent:
+        when = _parse(message.get(&quot;date&quot;, &quot;&quot;))
+        if created is not None and when is not None and when &lt; created:
+            continue
+        if recipients:
+            theirs = {r.lower() for r in message.get(&quot;recipients&quot;) or []}
+            if not (recipients &amp; theirs):
+                continue
+        window.append(message)
+
+    exact = [m for m in window if (m.get(&quot;subject&quot;) or &quot;&quot;).strip() == subject]
+    if exact:
+        return (&quot;ambiguous&quot;, exact) if len(exact) &gt; 1 else (&quot;matched&quot;, exact)
+
+    # No recipient means the time window is the only other filter, so the
+    # fuzzy path has nothing left to disambiguate with. Require exact only.
+    if not recipients:
+        return (&quot;none&quot;, [])
+
+    near = [
+        m for m in window
+        if similarity(draft.get(&quot;body&quot;, &quot;&quot;), m.get(&quot;body&quot;, &quot;&quot;)) &gt;= MATCH_THRESHOLD
+    ]
+    if not near:
+        return (&quot;none&quot;, [])
+    return (&quot;ambiguous&quot;, near) if len(near) &gt; 1 else (&quot;matched&quot;, near)
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 6: Run to verify they pass</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_draft_log.py -v</code>
+Expected: 19 passed.</p>
+<ul>
+<li>[ ] <strong>Step 7: Run the whole suite</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/ -q</code>
+Expected: all pass.</p>
+<ul>
+<li>[ ] <strong>Step 8: Commit</strong></li>
+</ul>
+<pre><code class="language-bash">git add scripts/draft_log.py scripts/ingest.py tests/test_draft_log.py
+git commit -m &quot;feat: match a logged draft to its sent message, failing closed on ambiguity&quot;
+</code></pre>
+<hr />
+<h2>Task 3: <code>diff_draft.py</code> — measure what changed</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>scripts/diff_draft.py</code></li>
+<li>Create: <code>fixtures/edit_pairs/draft.json</code>, <code>fixtures/edit_pairs/sent.json</code>, <code>fixtures/edit_pairs/README.md</code></li>
+<li>Test: <code>tests/test_diff_draft.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>
+<p>Consumes: <code>aggregate(messages, baseline)</code> from <code>fingerprint.py</code>; <code>flatten(node, prefix=&quot;&quot;)</code> from <code>eval_holdout.py</code>; <code>sentences(text)</code>, <code>opener_pattern(body)</code>, <code>closer_pattern(body)</code>, <code>paragraphs(text)</code> from <code>fingerprint.py</code>; <code>similarity</code> from <code>draft_log.py</code>.</p>
+</li>
+<li>
+<p>Produces:</p>
+<ul>
+<li><code>sentence_diff(draft_body: str, sent_body: str) -&gt; dict</code> → <code>{&quot;removed&quot;: [str], &quot;added&quot;: [str], &quot;changed&quot;: [[str, str]]}</code></li>
+<li><code>structural_deltas(draft: dict, sent: dict) -&gt; dict</code></li>
+<li><code>metric_deltas(draft: dict, sent: dict, baseline: dict) -&gt; dict</code> → flat <code>{metric_path: float}</code> of sent minus draft</li>
+<li><code>diff(draft: dict, sent: dict, baseline: dict) -&gt; dict</code> → <code>{&quot;classification&quot;: str, &quot;similarity&quot;: float, &quot;structural&quot;: {...}, &quot;metrics&quot;: {...}, &quot;sentences&quot;: {...}}</code> where classification is <code>&quot;edited&quot;</code> or <code>&quot;rewritten&quot;</code></li>
+<li>CLI: <code>python scripts/diff_draft.py --draft FILE --sent FILE --baseline FILE --out FILE</code></li>
+</ul>
+</li>
+<li>
+<p>[ ] <strong>Step 1: Create the fixture pair</strong></p>
+</li>
+</ul>
+<p><code>fixtures/edit_pairs/draft.json</code> — what wam produced:</p>
+<pre><code class="language-json">{
+  &quot;subject&quot;: &quot;Q3 rollout - confirming the date&quot;,
+  &quot;body&quot;: &quot;Hi Priya,\n\nCan you confirm the Q3 rollout date by Thursday? We are locking the deployment window this week and the vendor contract goes out on the 15th.\n\nI just wanted to flag that staging is still on the old config.\n\nHappy to jump on a call if that is easier.\n\nBest,\nDana Reyes&quot;,
+  &quot;word_count&quot;: 58,
+  &quot;date&quot;: &quot;2026-08-18T09:00:00-04:00&quot;,
+  &quot;to_domains&quot;: [&quot;harborline.com&quot;],
+  &quot;recipient_count&quot;: 1,
+  &quot;is_reply&quot;: false,
+  &quot;id&quot;: &quot;draft-1&quot;
+}
+</code></pre>
+<p><code>fixtures/edit_pairs/sent.json</code> — what the user actually sent. One hedge removed (<code>I just wanted to flag that</code> → direct), the closing offer sentence cut, and one figure corrected (15th → 18th):</p>
+<pre><code class="language-json">{
+  &quot;subject&quot;: &quot;Q3 rollout - confirming the date&quot;,
+  &quot;body&quot;: &quot;Hi Priya,\n\nCan you confirm the Q3 rollout date by Thursday? We are locking the deployment window this week and the vendor contract goes out on the 18th.\n\nStaging is still on the old config.\n\nBest,\nDana Reyes&quot;,
+  &quot;word_count&quot;: 42,
+  &quot;date&quot;: &quot;2026-08-18T11:00:00-04:00&quot;,
+  &quot;to_domains&quot;: [&quot;harborline.com&quot;],
+  &quot;recipient_count&quot;: 1,
+  &quot;is_reply&quot;: false,
+  &quot;id&quot;: &quot;sent-1&quot;
+}
+</code></pre>
+<p><code>fixtures/edit_pairs/README.md</code> must state that both files are fictional, that they belong to the Dana Reyes persona, and list the three designed changes above, because the tests assert on them.</p>
+<ul>
+<li>[ ] <strong>Step 2: Write the failing tests</strong></li>
+</ul>
+<pre><code class="language-python"># tests/test_diff_draft.py
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / &quot;scripts&quot;))
+
+from diff_draft import (  # noqa: E402
+    diff,
+    metric_deltas,
+    sentence_diff,
+    structural_deltas,
+)
+
+ROOT = Path(__file__).parent.parent
+PAIR = ROOT / &quot;fixtures&quot; / &quot;edit_pairs&quot;
+
+
+def load(name):
+    return json.loads((PAIR / name).read_text(encoding=&quot;utf-8&quot;))
+
+
+def baseline():
+    return json.loads(
+        (ROOT / &quot;fixtures&quot; / &quot;baseline_ngrams.json&quot;).read_text(encoding=&quot;utf-8&quot;)
+    )
+
+
+def test_sentence_diff_reports_a_removed_sentence():
+    result = sentence_diff(&quot;One. Two. Three.&quot;, &quot;One. Three.&quot;)
+    assert result[&quot;removed&quot;] == [&quot;Two.&quot;]
+    assert result[&quot;added&quot;] == []
+
+
+def test_sentence_diff_reports_an_added_sentence():
+    result = sentence_diff(&quot;One. Three.&quot;, &quot;One. Two. Three.&quot;)
+    assert result[&quot;added&quot;] == [&quot;Two.&quot;]
+    assert result[&quot;removed&quot;] == []
+
+
+def test_sentence_diff_reports_a_changed_sentence_as_a_pair():
+    result = sentence_diff(&quot;Ship on the 15th.&quot;, &quot;Ship on the 18th.&quot;)
+    assert result[&quot;changed&quot;] == [[&quot;Ship on the 15th.&quot;, &quot;Ship on the 18th.&quot;]]
+
+
+def test_sentence_diff_on_the_fixture_pair_finds_the_cut_offer():
+    result = sentence_diff(load(&quot;draft.json&quot;)[&quot;body&quot;], load(&quot;sent.json&quot;)[&quot;body&quot;])
+    joined = &quot; &quot;.join(result[&quot;removed&quot;])
+    assert &quot;Happy to jump on a call&quot; in joined
+
+
+def test_structural_deltas_report_the_length_cut():
+    result = structural_deltas(load(&quot;draft.json&quot;), load(&quot;sent.json&quot;))
+    assert result[&quot;word_count_delta&quot;] &lt; 0
+    assert result[&quot;word_count_pct&quot;] &lt; 0
+    assert result[&quot;subject_changed&quot;] is False
+
+
+def test_structural_deltas_carry_opener_and_signoff_both_sides():
+    result = structural_deltas(load(&quot;draft.json&quot;), load(&quot;sent.json&quot;))
+    assert result[&quot;opener&quot;][&quot;draft&quot;] == &quot;hi_name&quot;
+    assert result[&quot;opener&quot;][&quot;sent&quot;] == &quot;hi_name&quot;
+    assert result[&quot;signoff&quot;][&quot;draft&quot;][&quot;signoff&quot;] == &quot;best&quot;
+    assert result[&quot;signoff&quot;][&quot;sent&quot;][&quot;signoff&quot;] == &quot;best&quot;
+
+
+def test_metric_deltas_show_hedging_fell():
+    result = metric_deltas(load(&quot;draft.json&quot;), load(&quot;sent.json&quot;), baseline())
+    assert result[&quot;stance.hedges_per_100w&quot;] &lt; 0
+
+
+def test_metric_deltas_are_sent_minus_draft():
+    same = load(&quot;draft.json&quot;)
+    result = metric_deltas(same, same, baseline())
+    assert all(abs(v) &lt; 1e-9 for v in result.values())
+
+
+def test_diff_classifies_the_fixture_pair_as_edited():
+    result = diff(load(&quot;draft.json&quot;), load(&quot;sent.json&quot;), baseline())
+    assert result[&quot;classification&quot;] == &quot;edited&quot;
+    assert result[&quot;similarity&quot;] &gt;= 0.25
+
+
+def test_diff_classifies_a_replacement_as_rewritten():
+    draft = load(&quot;draft.json&quot;)
+    replacement = {
+        **draft,
+        &quot;body&quot;: &quot;Priya - moving the whole conversation to a call tomorrow &quot;
+                &quot;instead. Nothing else to report from my side this week.&quot;,
+    }
+    result = diff(draft, replacement, baseline())
+    assert result[&quot;classification&quot;] == &quot;rewritten&quot;
+    assert result[&quot;similarity&quot;] &lt; 0.25
+
+
+def test_cli_writes_a_diff_file(tmp_path):
+    out = tmp_path / &quot;diff.json&quot;
+    result = subprocess.run(
+        [sys.executable, str(ROOT / &quot;scripts&quot; / &quot;diff_draft.py&quot;),
+         &quot;--draft&quot;, str(PAIR / &quot;draft.json&quot;),
+         &quot;--sent&quot;, str(PAIR / &quot;sent.json&quot;),
+         &quot;--baseline&quot;, str(ROOT / &quot;fixtures&quot; / &quot;baseline_ngrams.json&quot;),
+         &quot;--out&quot;, str(out)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(out.read_text(encoding=&quot;utf-8&quot;))
+    assert set(data) == {&quot;classification&quot;, &quot;similarity&quot;, &quot;structural&quot;,
+                         &quot;metrics&quot;, &quot;sentences&quot;}
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 3: Run to verify failure</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_diff_draft.py -v</code>
+Expected: FAIL — <code>ModuleNotFoundError: No module named 'diff_draft'</code></p>
+<ul>
+<li>[ ] <strong>Step 4: Implement</strong></li>
+</ul>
+<pre><code class="language-python"># scripts/diff_draft.py
+&quot;&quot;&quot;Measure the difference between a draft write-as-me produced and what the
+user actually sent.&quot;&quot;&quot;
+from __future__ import annotations
+
+import argparse
+import difflib
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from draft_log import REWRITE_THRESHOLD, similarity  # noqa: E402
+from eval_holdout import flatten  # noqa: E402
+from fingerprint import (  # noqa: E402
+    aggregate,
+    closer_pattern,
+    opener_pattern,
+    paragraphs,
+    sentences,
+)
+
+
+def sentence_diff(draft_body: str, sent_body: str) -&gt; dict:
+    &quot;&quot;&quot;Sentence-level diff.
+
+    A removed sentence is the single most interpretable output this module
+    produces — &quot;cut 'Happy to jump on a call'&quot; is actionable in a way that
+    &quot;bullet rate fell 0.04&quot; is not.
+    &quot;&quot;&quot;
+    before, after = sentences(draft_body), sentences(sent_body)
+    matcher = difflib.SequenceMatcher(a=before, b=after, autojunk=False)
+    removed: list[str] = []
+    added: list[str] = []
+    changed: list[list[str]] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == &quot;delete&quot;:
+            removed.extend(before[i1:i2])
+        elif tag == &quot;insert&quot;:
+            added.extend(after[j1:j2])
+        elif tag == &quot;replace&quot;:
+            old, new = before[i1:i2], after[j1:j2]
+            for index in range(min(len(old), len(new))):
+                changed.append([old[index], new[index]])
+            removed.extend(old[len(new):])
+            added.extend(new[len(old):])
+    return {&quot;removed&quot;: removed, &quot;added&quot;: added, &quot;changed&quot;: changed}
+
+
+def structural_deltas(draft: dict, sent: dict) -&gt; dict:
+    draft_body, sent_body = draft.get(&quot;body&quot;, &quot;&quot;), sent.get(&quot;body&quot;, &quot;&quot;)
+    draft_words = len(draft_body.split())
+    sent_words = len(sent_body.split())
+    pct = ((sent_words - draft_words) / draft_words * 100) if draft_words else 0.0
+    return {
+        &quot;word_count_delta&quot;: sent_words - draft_words,
+        &quot;word_count_pct&quot;: round(pct, 1),
+        &quot;sentence_count&quot;: {&quot;draft&quot;: len(sentences(draft_body)),
+                           &quot;sent&quot;: len(sentences(sent_body))},
+        &quot;paragraph_count&quot;: {&quot;draft&quot;: len(paragraphs(draft_body)),
+                            &quot;sent&quot;: len(paragraphs(sent_body))},
+        &quot;opener&quot;: {&quot;draft&quot;: opener_pattern(draft_body),
+                   &quot;sent&quot;: opener_pattern(sent_body)},
+        &quot;signoff&quot;: {&quot;draft&quot;: closer_pattern(draft_body),
+                    &quot;sent&quot;: closer_pattern(sent_body)},
+        &quot;subject_changed&quot;: (draft.get(&quot;subject&quot;) or &quot;&quot;) != (sent.get(&quot;subject&quot;) or &quot;&quot;),
+        &quot;subject&quot;: {&quot;draft&quot;: draft.get(&quot;subject&quot;, &quot;&quot;), &quot;sent&quot;: sent.get(&quot;subject&quot;, &quot;&quot;)},
+    }
+
+
+def metric_deltas(draft: dict, sent: dict, baseline: dict) -&gt; dict:
+    &quot;&quot;&quot;Sent minus draft, over every scalar metric aggregate() produces.&quot;&quot;&quot;
+    before = flatten(aggregate([draft], baseline))
+    after = flatten(aggregate([sent], baseline))
+    return {
+        key: round(after[key] - before[key], 4)
+        for key in before.keys() &amp; after.keys()
+    }
+
+
+def diff(draft: dict, sent: dict, baseline: dict) -&gt; dict:
+    score = similarity(draft.get(&quot;body&quot;, &quot;&quot;), sent.get(&quot;body&quot;, &quot;&quot;))
+    return {
+        &quot;classification&quot;: &quot;rewritten&quot; if score &lt; REWRITE_THRESHOLD else &quot;edited&quot;,
+        &quot;similarity&quot;: round(score, 4),
+        &quot;structural&quot;: structural_deltas(draft, sent),
+        &quot;metrics&quot;: metric_deltas(draft, sent, baseline),
+        &quot;sentences&quot;: sentence_diff(draft.get(&quot;body&quot;, &quot;&quot;), sent.get(&quot;body&quot;, &quot;&quot;)),
+    }
+
+
+def main() -&gt; int:
+    ap = argparse.ArgumentParser(description=&quot;Diff a draft against what was sent.&quot;)
+    ap.add_argument(&quot;--draft&quot;, required=True)
+    ap.add_argument(&quot;--sent&quot;, required=True)
+    ap.add_argument(&quot;--baseline&quot;, required=True)
+    ap.add_argument(&quot;--out&quot;, required=True)
+    args = ap.parse_args()
+
+    def read(path: str) -&gt; dict:
+        return json.loads(Path(path).read_text(encoding=&quot;utf-8&quot;))
+
+    result = diff(read(args.draft), read(args.sent), read(args.baseline))
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(result, indent=2), encoding=&quot;utf-8&quot;)
+    print(
+        f&quot;{result['classification']} (similarity {result['similarity']}), &quot;
+        f&quot;{len(result['sentences']['removed'])} sentences removed -&gt; {args.out}&quot;
+    )
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    raise SystemExit(main())
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 5: Run to verify they pass</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_diff_draft.py -v</code>
+Expected: 11 passed. If <code>test_metric_deltas_show_hedging_fell</code> fails, check that the draft fixture's &quot;I just wanted to flag that&quot; is actually matching the <code>HEDGES</code> pattern in <code>fingerprint.py</code> — <code>just</code> and <code>wanted to</code> are the relevant tokens.</p>
+<ul>
+<li>[ ] <strong>Step 6: Run the whole suite</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/ -q</code>
+Expected: all pass.</p>
+<ul>
+<li>[ ] <strong>Step 7: Commit</strong></li>
+</ul>
+<pre><code class="language-bash">git add scripts/diff_draft.py fixtures/edit_pairs tests/test_diff_draft.py
+git commit -m &quot;feat: measure draft-vs-sent deltas with a sentence-level diff&quot;
+</code></pre>
+<hr />
+<h2>Task 4: <code>edit_log.py</code> — observations and the promotion rule</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Create: <code>scripts/edit_log.py</code></li>
+<li>Test: <code>tests/test_edit_log.py</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>
+<p>Consumes: nothing from earlier tasks at runtime.</p>
+</li>
+<li>
+<p>Produces:</p>
+<ul>
+<li><code>DEFAULT_LOG: Path</code> — <code>Path.home() / &quot;.claude&quot; / &quot;wam&quot; / &quot;edits.jsonl&quot;</code></li>
+<li><code>DIMENSIONS: frozenset[str]</code> — exactly the ten spec values</li>
+<li><code>PROMOTION_THRESHOLD: int = 2</code></li>
+<li><code>validate_observation(obs: dict) -&gt; None</code> (raises <code>ValueError</code> on an unknown dimension or malformed direction)</li>
+<li><code>record_edit(draft_id: str, classification: str, observations: list[dict], factual_changes: list[str], *, reviewed: str, path: Path) -&gt; None</code></li>
+<li><code>load_edits(path: Path) -&gt; list[dict]</code></li>
+<li><code>promotable(edits: list[dict], threshold: int = PROMOTION_THRESHOLD) -&gt; list[dict]</code> → <code>[{&quot;dimension&quot;: str, &quot;direction&quot;: str, &quot;count&quot;: int, &quot;evidence&quot;: [str]}]</code></li>
+</ul>
+</li>
+<li>
+<p>[ ] <strong>Step 1: Write the failing tests</strong></p>
+</li>
+</ul>
+<pre><code class="language-python"># tests/test_edit_log.py
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent.parent / &quot;scripts&quot;))
+
+from edit_log import (  # noqa: E402
+    DIMENSIONS,
+    PROMOTION_THRESHOLD,
+    load_edits,
+    promotable,
+    record_edit,
+    validate_observation,
+)
+
+REVIEWED = &quot;2026-08-19T09:14:00-04:00&quot;
+
+
+def obs(dimension=&quot;hedging&quot;, direction=&quot;reduce&quot;, evidence=&quot;removed: 'just'&quot;):
+    return {&quot;dimension&quot;: dimension, &quot;direction&quot;: direction, &quot;evidence&quot;: evidence}
+
+
+def test_dimension_vocabulary_is_the_spec_list():
+    assert DIMENSIONS == frozenset({
+        &quot;length&quot;, &quot;hedging&quot;, &quot;opener&quot;, &quot;signoff&quot;, &quot;ask_placement&quot;,
+        &quot;structure&quot;, &quot;punctuation&quot;, &quot;contractions&quot;, &quot;formality&quot;,
+        &quot;closing_offer&quot;,
+    })
+
+
+def test_validate_rejects_an_unknown_dimension():
+    &quot;&quot;&quot;Free-text dimensions would never match each other, so nothing would
+    ever reach the promotion threshold and the loop would silently do nothing.&quot;&quot;&quot;
+    with pytest.raises(ValueError):
+        validate_observation(obs(dimension=&quot;hedges&quot;))
+
+
+def test_validate_rejects_a_malformed_direction():
+    with pytest.raises(ValueError):
+        validate_observation(obs(direction=&quot;less&quot;))
+
+
+def test_validate_accepts_replace_with_a_value():
+    validate_observation(obs(dimension=&quot;signoff&quot;, direction=&quot;replace:none&quot;))
+
+
+def test_record_and_load_round_trip(tmp_path):
+    log = tmp_path / &quot;edits.jsonl&quot;
+    record_edit(&quot;d-1&quot;, &quot;edited&quot;, [obs()], [&quot;figure 15th -&gt; 18th&quot;],
+                reviewed=REVIEWED, path=log)
+    edits = load_edits(log)
+    assert len(edits) == 1
+    assert edits[0][&quot;draft_id&quot;] == &quot;d-1&quot;
+    assert edits[0][&quot;factual_changes&quot;] == [&quot;figure 15th -&gt; 18th&quot;]
+    assert edits[0][&quot;observations&quot;][0][&quot;dimension&quot;] == &quot;hedging&quot;
+
+
+def test_record_rejects_an_invalid_observation(tmp_path):
+    log = tmp_path / &quot;edits.jsonl&quot;
+    with pytest.raises(ValueError):
+        record_edit(&quot;d-1&quot;, &quot;edited&quot;, [obs(dimension=&quot;nonsense&quot;)], [],
+                    reviewed=REVIEWED, path=log)
+    assert load_edits(log) == []
+
+
+def test_one_observation_does_not_promote():
+    edits = [{&quot;draft_id&quot;: &quot;d-1&quot;, &quot;observations&quot;: [obs()]}]
+    assert promotable(edits) == []
+
+
+def test_two_in_the_same_direction_promote():
+    edits = [
+        {&quot;draft_id&quot;: &quot;d-1&quot;, &quot;observations&quot;: [obs(evidence=&quot;e1&quot;)]},
+        {&quot;draft_id&quot;: &quot;d-2&quot;, &quot;observations&quot;: [obs(evidence=&quot;e2&quot;)]},
+    ]
+    result = promotable(edits)
+    assert len(result) == 1
+    assert result[0][&quot;dimension&quot;] == &quot;hedging&quot;
+    assert result[0][&quot;direction&quot;] == &quot;reduce&quot;
+    assert result[0][&quot;count&quot;] == 2
+    assert result[0][&quot;evidence&quot;] == [&quot;e1&quot;, &quot;e2&quot;]
+
+
+def test_two_in_opposite_directions_do_not_promote():
+    &quot;&quot;&quot;A dimension the user has pushed both ways is unresolved, not learned.&quot;&quot;&quot;
+    edits = [
+        {&quot;draft_id&quot;: &quot;d-1&quot;, &quot;observations&quot;: [obs(direction=&quot;reduce&quot;)]},
+        {&quot;draft_id&quot;: &quot;d-2&quot;, &quot;observations&quot;: [obs(direction=&quot;increase&quot;)]},
+        {&quot;draft_id&quot;: &quot;d-3&quot;, &quot;observations&quot;: [obs(direction=&quot;reduce&quot;)]},
+    ]
+    assert promotable(edits) == []
+
+
+def test_two_observations_from_the_same_draft_do_not_promote():
+    &quot;&quot;&quot;Two hedges cut from one email is one edit, not two independent signals.&quot;&quot;&quot;
+    edits = [{&quot;draft_id&quot;: &quot;d-1&quot;,
+              &quot;observations&quot;: [obs(evidence=&quot;e1&quot;), obs(evidence=&quot;e2&quot;)]}]
+    assert promotable(edits) == []
+
+
+def test_promotion_threshold_is_the_spec_value():
+    assert PROMOTION_THRESHOLD == 2
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: Run to verify failure</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_edit_log.py -v</code>
+Expected: FAIL — <code>ModuleNotFoundError: No module named 'edit_log'</code></p>
+<ul>
+<li>[ ] <strong>Step 3: Implement</strong></li>
+</ul>
+<pre><code class="language-python"># scripts/edit_log.py
+&quot;&quot;&quot;Voice observations derived from user edits, and the rule that decides when
+one becomes a profile directive.&quot;&quot;&quot;
+from __future__ import annotations
+
+import json
+from collections import defaultdict
+from pathlib import Path
+
+DEFAULT_LOG = Path.home() / &quot;.claude&quot; / &quot;wam&quot; / &quot;edits.jsonl&quot;
+PROMOTION_THRESHOLD = 2
+
+# Closed vocabulary. Promotion counts observations sharing a dimension and a
+# direction, so free-text labels would never match each other and nothing would
+# ever reach the threshold. Never extend this at runtime.
+DIMENSIONS = frozenset({
+    &quot;length&quot;, &quot;hedging&quot;, &quot;opener&quot;, &quot;signoff&quot;, &quot;ask_placement&quot;,
+    &quot;structure&quot;, &quot;punctuation&quot;, &quot;contractions&quot;, &quot;formality&quot;, &quot;closing_offer&quot;,
+})
+DIRECTIONS = (&quot;reduce&quot;, &quot;increase&quot;)
+
+
+def validate_observation(obs: dict) -&gt; None:
+    dimension = obs.get(&quot;dimension&quot;)
+    if dimension not in DIMENSIONS:
+        raise ValueError(
+            f&quot;unknown dimension {dimension!r}; expected one of {sorted(DIMENSIONS)}&quot;
+        )
+    direction = obs.get(&quot;direction&quot;, &quot;&quot;)
+    if direction not in DIRECTIONS and not direction.startswith(&quot;replace:&quot;):
+        raise ValueError(
+            f&quot;bad direction {direction!r}; expected reduce, increase, or replace:&lt;value&gt;&quot;
+        )
+    if not obs.get(&quot;evidence&quot;):
+        raise ValueError(&quot;observation needs verbatim evidence&quot;)
+
+
+def record_edit(
+    draft_id: str,
+    classification: str,
+    observations: list[dict],
+    factual_changes: list[str],
+    *,
+    reviewed: str,
+    path: Path = DEFAULT_LOG,
+) -&gt; None:
+    for obs in observations:
+        validate_observation(obs)
+    record = {
+        &quot;draft_id&quot;: draft_id,
+        &quot;reviewed&quot;: reviewed,
+        &quot;classification&quot;: classification,
+        &quot;observations&quot;: observations,
+        &quot;factual_changes&quot;: list(factual_changes),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open(&quot;a&quot;, encoding=&quot;utf-8&quot;) as handle:
+        handle.write(json.dumps(record) + &quot;\n&quot;)
+
+
+def load_edits(path: Path = DEFAULT_LOG) -&gt; list[dict]:
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text(encoding=&quot;utf-8&quot;).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def promotable(edits: list[dict], threshold: int = PROMOTION_THRESHOLD) -&gt; list[dict]:
+    &quot;&quot;&quot;Dimensions supported by enough independent edits to propose a change.
+
+    Independence is per draft: two hedges cut from one email is one signal,
+    not two. A dimension the user has pushed in both directions is unresolved
+    and never promotes.
+    &quot;&quot;&quot;
+    drafts_by_pair: dict[tuple[str, str], set[str]] = defaultdict(set)
+    evidence_by_pair: dict[tuple[str, str], list[str]] = defaultdict(list)
+    directions_by_dimension: dict[str, set[str]] = defaultdict(set)
+
+    for edit in edits:
+        draft_id = edit.get(&quot;draft_id&quot;, &quot;&quot;)
+        for obs in edit.get(&quot;observations&quot;) or []:
+            dimension = obs.get(&quot;dimension&quot;)
+            direction = obs.get(&quot;direction&quot;)
+            if dimension not in DIMENSIONS or not direction:
+                continue
+            pair = (dimension, direction)
+            directions_by_dimension[dimension].add(direction)
+            if draft_id not in drafts_by_pair[pair]:
+                drafts_by_pair[pair].add(draft_id)
+                evidence_by_pair[pair].append(obs.get(&quot;evidence&quot;, &quot;&quot;))
+
+    out = []
+    for (dimension, direction), draft_ids in sorted(drafts_by_pair.items()):
+        if len(directions_by_dimension[dimension]) &gt; 1:
+            continue
+        if len(draft_ids) &gt;= threshold:
+            out.append({
+                &quot;dimension&quot;: dimension,
+                &quot;direction&quot;: direction,
+                &quot;count&quot;: len(draft_ids),
+                &quot;evidence&quot;: evidence_by_pair[(dimension, direction)],
+            })
+    return out
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: Run to verify they pass</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_edit_log.py -v</code>
+Expected: 11 passed.</p>
+<ul>
+<li>[ ] <strong>Step 5: Run the whole suite</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/ -q</code>
+Expected: all pass.</p>
+<ul>
+<li>[ ] <strong>Step 6: Commit</strong></li>
+</ul>
+<pre><code class="language-bash">git add scripts/edit_log.py tests/test_edit_log.py
+git commit -m &quot;feat: validated edit observations and a per-draft promotion rule&quot;
+</code></pre>
+<hr />
+<h2>Task 5: Write mode logs its drafts, and the automatic check</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>skills/write-as-me/SKILL.md</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>
+<p>Consumes: <code>record_draft</code>, <code>load_drafts</code>, <code>expire_old</code>, <code>pending</code> from <code>draft_log.py</code>.</p>
+</li>
+<li>
+<p>Produces: a <code>drafts.jsonl</code> entry per presented draft; a one-line offer at the top of any <code>/wam</code> invocation.</p>
+</li>
+<li>
+<p>[ ] <strong>Step 1: Add draft logging to write mode Step 5</strong></p>
+</li>
+</ul>
+<p>In <code>skills/write-as-me/SKILL.md</code>, at the end of write mode's Step 5 (Present), add:</p>
+<pre><code class="language-markdown">### Step 6 — Log the draft
+
+After presenting, record it so review mode can find the sent version later:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --record \
+  --register &lt;REGISTER&gt; --recipients &quot;&lt;COMMA SEPARATED&gt;&quot; \
+  --subject &quot;&lt;SUBJECT&gt;&quot; --body-file &lt;TEMP FILE&gt; --created &quot;&lt;ISO-8601 NOW&gt;&quot;
+```
+
+Write the body to a temp file rather than passing it as an argument — draft
+bodies contain newlines and quotes that do not survive a shell argument.
+
+If the recipient was never supplied and the draft uses the `Hi [Name],`
+placeholder, pass `--recipients &quot;&quot;`. Review mode will then require an exact
+subject match, which is the safe behaviour when there is no recipient to
+disambiguate with.
+
+Logging is best-effort: if it fails, say so in one line and move on. A failed
+log must never cost the user the draft they asked for.
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 2: Add the <code>--record</code> CLI to <code>draft_log.py</code></strong></li>
+</ul>
+<pre><code class="language-python">def main() -&gt; int:
+    ap = argparse.ArgumentParser(description=&quot;Record and inspect drafts.&quot;)
+    ap.add_argument(&quot;--record&quot;, action=&quot;store_true&quot;)
+    ap.add_argument(&quot;--register&quot;, default=&quot;&quot;)
+    ap.add_argument(&quot;--recipients&quot;, default=&quot;&quot;)
+    ap.add_argument(&quot;--subject&quot;, default=&quot;&quot;)
+    ap.add_argument(&quot;--body-file&quot;)
+    ap.add_argument(&quot;--created&quot;, default=&quot;&quot;)
+    ap.add_argument(&quot;--list-pending&quot;, action=&quot;store_true&quot;)
+    ap.add_argument(&quot;--match&quot;, action=&quot;store_true&quot;)
+    ap.add_argument(&quot;--draft-file&quot;, help=&quot;JSON draft record, for --match&quot;)
+    ap.add_argument(&quot;--candidates-file&quot;, help=&quot;JSON list of sent messages, for --match&quot;)
+    ap.add_argument(&quot;--now&quot;, default=&quot;&quot;, help=&quot;ISO-8601; drives retention&quot;)
+    ap.add_argument(&quot;--log&quot;, default=str(DEFAULT_LOG))
+    args = ap.parse_args()
+
+    log = Path(args.log)
+
+    if args.match:
+        draft = json.loads(Path(args.draft_file).read_text(encoding=&quot;utf-8&quot;))
+        candidates = json.loads(Path(args.candidates_file).read_text(encoding=&quot;utf-8&quot;))
+        status, hits = find_match(draft, candidates)
+        print(json.dumps({&quot;status&quot;: status, &quot;candidates&quot;: hits}, indent=2))
+        return 0
+
+    if args.record:
+        body = Path(args.body_file).read_text(encoding=&quot;utf-8&quot;) if args.body_file else &quot;&quot;
+        recipients = [r.strip() for r in args.recipients.split(&quot;,&quot;) if r.strip()]
+        draft_id = record_draft(
+            args.register, recipients, args.subject, body,
+            created=args.created, path=log,
+        )
+        print(draft_id)
+        return 0
+
+    if args.list_pending:
+        drafts = load_drafts(log)
+        if args.now:
+            kept = expire_old(drafts, args.now)
+            if len(kept) != len(drafts):
+                _rewrite(kept, log)
+                drafts = kept
+        for draft in pending(drafts):
+            print(json.dumps({k: draft[k] for k in
+                              (&quot;id&quot;, &quot;created&quot;, &quot;register&quot;, &quot;recipients&quot;, &quot;subject&quot;)}))
+        return 0
+
+    ap.error(&quot;nothing to do: pass --record or --list-pending&quot;)
+    return 2
+
+
+if __name__ == &quot;__main__&quot;:
+    raise SystemExit(main())
+</code></pre>
+<p>Add <code>import argparse</code> to the module's imports.</p>
+<ul>
+<li>[ ] <strong>Step 3: Write the CLI test</strong></li>
+</ul>
+<p>Append to <code>tests/test_draft_log.py</code>:</p>
+<pre><code class="language-python">import subprocess
+
+
+def test_record_cli_writes_an_entry(tmp_path):
+    root = Path(__file__).parent.parent
+    log = tmp_path / &quot;drafts.jsonl&quot;
+    body = tmp_path / &quot;body.txt&quot;
+    body.write_text(&quot;Caden,\n\nBody with \&quot;quotes\&quot; and\nnewlines.&quot;, encoding=&quot;utf-8&quot;)
+    result = subprocess.run(
+        [sys.executable, str(root / &quot;scripts&quot; / &quot;draft_log.py&quot;), &quot;--record&quot;,
+         &quot;--register&quot;, &quot;client&quot;, &quot;--recipients&quot;, &quot;caden@example.com&quot;,
+         &quot;--subject&quot;, &quot;Listings&quot;, &quot;--body-file&quot;, str(body),
+         &quot;--created&quot;, CREATED, &quot;--log&quot;, str(log)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    drafts = load_drafts(log)
+    assert len(drafts) == 1
+    assert drafts[0][&quot;body&quot;].endswith(&quot;newlines.&quot;)
+    assert result.stdout.strip() == drafts[0][&quot;id&quot;]
+
+
+def test_list_pending_cli_applies_retention(tmp_path):
+    root = Path(__file__).parent.parent
+    log = tmp_path / &quot;drafts.jsonl&quot;
+    record_draft(&quot;client&quot;, [], &quot;old&quot;, &quot;b&quot;, created=&quot;2026-07-01T00:00:00-04:00&quot;,
+                 path=log)
+    record_draft(&quot;client&quot;, [], &quot;new&quot;, &quot;b&quot;, created=&quot;2026-08-17T00:00:00-04:00&quot;,
+                 path=log)
+    result = subprocess.run(
+        [sys.executable, str(root / &quot;scripts&quot; / &quot;draft_log.py&quot;), &quot;--list-pending&quot;,
+         &quot;--now&quot;, &quot;2026-08-18T00:00:00-04:00&quot;, &quot;--log&quot;, str(log)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert &quot;new&quot; in result.stdout
+    assert &quot;old&quot; not in result.stdout
+    assert len(load_drafts(log)) == 1
+</code></pre>
+<p>Also append a test for the match CLI, since review mode depends on it:</p>
+<pre><code class="language-python">def test_match_cli_reports_status_and_candidates(tmp_path):
+    root = Path(__file__).parent.parent
+    draft_file = tmp_path / &quot;draft.json&quot;
+    cand_file = tmp_path / &quot;candidates.json&quot;
+    draft_file.write_text(json.dumps(DRAFT), encoding=&quot;utf-8&quot;)
+    cand_file.write_text(
+        json.dumps([_sent(&quot;Listings - what changes&quot;, DRAFT[&quot;body&quot;])]),
+        encoding=&quot;utf-8&quot;,
+    )
+    result = subprocess.run(
+        [sys.executable, str(root / &quot;scripts&quot; / &quot;draft_log.py&quot;), &quot;--match&quot;,
+         &quot;--draft-file&quot;, str(draft_file), &quot;--candidates-file&quot;, str(cand_file)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload[&quot;status&quot;] == &quot;matched&quot;
+    assert len(payload[&quot;candidates&quot;]) == 1
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 4: Run to verify they pass</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/test_draft_log.py -v</code>
+Expected: 22 passed.</p>
+<ul>
+<li>[ ] <strong>Step 5: Add the automatic check to the top of SKILL.md's mode routing</strong></li>
+</ul>
+<p>Insert directly after the mode-routing table:</p>
+<pre><code class="language-markdown">## Before either mode — the pending-edit check
+
+Run once at the start of every invocation, before doing what the user asked:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --list-pending --now &quot;&lt;ISO-8601 NOW&gt;&quot;
+```
+
+For each pending draft, check whether it has since been sent (see review mode's
+matching step). If any have, say **exactly one line** and then carry on with the
+user's actual request:
+
+&gt; 2 drafts you sent have edits I haven't learned from — review them?
+
+Rules:
+- Never block. The user asked for something; this check does not get to
+  postpone it.
+- If they decline, do not raise it again in this session.
+- If no Gmail tools are available, say once that the edit loop cannot run
+  without them, and never mention it again.
+- If `drafts.jsonl` is missing or unreadable, treat it as empty and say nothing.
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 6: Run the whole suite</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/ -q</code>
+Expected: all pass.</p>
+<ul>
+<li>[ ] <strong>Step 7: Commit</strong></li>
+</ul>
+<pre><code class="language-bash">git add scripts/draft_log.py skills/write-as-me/SKILL.md tests/test_draft_log.py
+git commit -m &quot;feat: log presented drafts and offer a pending-edit review&quot;
+</code></pre>
+<hr />
+<h2>Task 6: Review mode, profile updates, and docs</h2>
+<p><strong>Files:</strong></p>
+<ul>
+<li>Modify: <code>skills/write-as-me/SKILL.md</code></li>
+<li>Modify: <code>README.md</code></li>
+<li>Modify: <code>.gitignore</code></li>
+</ul>
+<p><strong>Interfaces:</strong></p>
+<ul>
+<li>
+<p>Consumes: everything from Tasks 1–5.</p>
+</li>
+<li>
+<p>Produces: <code>/wam review</code>; profile directives tagged with provenance.</p>
+</li>
+<li>
+<p>[ ] <strong>Step 1: Add the state files to <code>.gitignore</code></strong></p>
+</li>
+</ul>
+<pre><code class="language-gitignore">drafts.jsonl
+edits.jsonl
+</code></pre>
+<p>These live in <code>~/.claude/wam/</code> and should never be in a repo, but a user who
+copies one into the working directory to inspect it must not be able to commit
+it — the same defensive reasoning as the existing <code>corpus.json</code> entry.</p>
+<ul>
+<li>[ ] <strong>Step 2: Append review mode to <code>SKILL.md</code></strong></li>
+</ul>
+<pre><code class="language-markdown">## Review mode
+
+Triggered by `/wam review`, or by the user accepting the pending-edit offer.
+
+If `~/.claude/wam/default.md` does not exist, there is nothing to update — say
+so and offer analyze mode instead.
+
+### Step 1 — Find the sent versions
+
+List pending drafts:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --list-pending --now &quot;&lt;ISO-8601 NOW&gt;&quot;
+```
+
+For each, search `in:sent` for its subject, restricted to messages sent after
+the draft's `created` timestamp and addressed to one of its recipients. Build
+each candidate as `{&quot;subject&quot;, &quot;body&quot;, &quot;recipients&quot;, &quot;date&quot;}`, write the draft
+record and the candidate list to temp files, and let the matcher decide — do not
+decide by eye:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --match   --draft-file &lt;DRAFT JSON&gt; --candidates-file &lt;CANDIDATES JSON&gt;
+```
+
+It prints `{&quot;status&quot;: ..., &quot;candidates&quot;: [...]}` where status is `matched`,
+`ambiguous`, or `none`.
+
+- `matched` — proceed.
+- `ambiguous` — show the user the candidate subjects and dates and ask which,
+  if any. Never pick one yourself: learning from the wrong message teaches the
+  profile from someone else's writing.
+- `none` — leave it `pending`. It expires on its own at 30 days. Say nothing.
+
+### Step 2 — Measure the change
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/diff_draft.py \
+  --draft &lt;DRAFT FILE&gt; --sent &lt;SENT FILE&gt; \
+  --baseline ${CLAUDE_PLUGIN_ROOT}/fixtures/baseline_ngrams.json \
+  --out &lt;DIFF FILE&gt;
+```
+
+If `classification` is `rewritten`, record it and derive nothing:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/edit_log.py --record \
+  --draft-id &lt;ID&gt; --classification rewritten --reviewed &quot;&lt;ISO-8601 NOW&gt;&quot;
+```
+
+Then tell the user plainly that they replaced rather than edited that draft, and
+that a run of rewrites means the profile is wrong at the root — re-running
+analyze mode will serve them better than incremental learning.
+
+### Step 3 — Classify every change
+
+Read the diff file. For each removed sentence, added sentence, changed pair, and
+non-trivial metric delta, decide which of three buckets it belongs in:
+
+- **Factual** — a number, name, date, link, or fact changed, or content added
+  that you could not have known. Record it in `factual_changes`. **It never
+  becomes a profile directive.** The profile describes how the user writes, not
+  what they know.
+- **Voice** — a hedge removed, a sentence cut with no loss of information, an
+  opener or signoff changed, a length cut, a structural change.
+- **Neutral** — typo fixes, whitespace, reformatting. Ignore.
+
+A single change can be both: &quot;the vendor contract goes out on the 15th&quot; →
+&quot;on the 18th&quot; is factual only, while &quot;I just wanted to flag that staging is
+still on the old config&quot; → &quot;Staging is still on the old config&quot; is voice only.
+Judge them separately.
+
+### Step 4 — Record observations
+
+Each voice change becomes one observation with a dimension from the closed
+vocabulary — `length`, `hedging`, `opener`, `signoff`, `ask_placement`,
+`structure`, `punctuation`, `contractions`, `formality`, `closing_offer` — a
+direction of `reduce`, `increase`, or `replace:&lt;value&gt;`, and **verbatim
+evidence**. Paraphrased evidence is worthless later: the whole point is showing
+the user the actual sentence they cut.
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/edit_log.py --record \
+  --draft-id &lt;ID&gt; --classification edited --reviewed &quot;&lt;ISO-8601 NOW&gt;&quot; \
+  --observations-file &lt;JSON FILE&gt; --factual-file &lt;JSON FILE&gt;
+```
+
+The recorder rejects a dimension outside the vocabulary. That is deliberate:
+free-text labels would never match each other and nothing would ever promote.
+If a change genuinely does not fit any dimension, drop it rather than inventing
+a label.
+
+### Step 5 — Propose what has earned promotion
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/edit_log.py --promotable
+```
+
+This returns only dimensions with two or more observations from **separate
+drafts** pointing the same way. Present each one on its own:
+
+- State the proposed profile line.
+- Show **both** pieces of verbatim evidence.
+- If it contradicts a directive the profile measured from the corpus, say so
+  and show both figures. Two edits do not silently overrule sixteen emails.
+- Ask. One approval per change — never a batch yes.
+
+### Step 6 — Apply approved changes
+
+Edit `~/.claude/wam/default.md`, tagging every learned line with provenance:
+
+```markdown
+- Cut the closing offer sentence; you delete it. (learned from 2 edits, 2026-08-18)
+```
+
+Provenance is required. A directive resting on two edits is weaker evidence than
+one resting on the whole corpus, and the profile must not present them as equal.
+The tag also lets the user strip learned lines wholesale if the loop drifts.
+
+Then mark each reviewed draft `matched`, and report: how many drafts were
+reviewed, how many changes were factual, how many observations were recorded,
+and how many are still short of promotion.
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 3: Add the <code>edit_log.py</code> CLI</strong></li>
+</ul>
+<pre><code class="language-python">def main() -&gt; int:
+    ap = argparse.ArgumentParser(description=&quot;Record edits and check promotions.&quot;)
+    ap.add_argument(&quot;--record&quot;, action=&quot;store_true&quot;)
+    ap.add_argument(&quot;--promotable&quot;, action=&quot;store_true&quot;)
+    ap.add_argument(&quot;--draft-id&quot;, default=&quot;&quot;)
+    ap.add_argument(&quot;--classification&quot;, default=&quot;edited&quot;)
+    ap.add_argument(&quot;--reviewed&quot;, default=&quot;&quot;)
+    ap.add_argument(&quot;--observations-file&quot;)
+    ap.add_argument(&quot;--factual-file&quot;)
+    ap.add_argument(&quot;--log&quot;, default=str(DEFAULT_LOG))
+    args = ap.parse_args()
+
+    log = Path(args.log)
+
+    if args.record:
+        def read_list(path: str | None) -&gt; list:
+            if not path:
+                return []
+            return json.loads(Path(path).read_text(encoding=&quot;utf-8&quot;))
+
+        record_edit(
+            args.draft_id, args.classification,
+            read_list(args.observations_file), read_list(args.factual_file),
+            reviewed=args.reviewed, path=log,
+        )
+        print(f&quot;recorded {args.classification} for {args.draft_id}&quot;)
+        return 0
+
+    if args.promotable:
+        print(json.dumps(promotable(load_edits(log)), indent=2))
+        return 0
+
+    ap.error(&quot;nothing to do: pass --record or --promotable&quot;)
+    return 2
+
+
+if __name__ == &quot;__main__&quot;:
+    raise SystemExit(main())
+</code></pre>
+<p>Add <code>import argparse</code> to the module's imports.</p>
+<ul>
+<li>[ ] <strong>Step 4: Write the CLI test</strong></li>
+</ul>
+<p>Append to <code>tests/test_edit_log.py</code>:</p>
+<pre><code class="language-python">import json
+import subprocess
+
+
+def test_record_and_promotable_cli(tmp_path):
+    root = Path(__file__).parent.parent
+    log = tmp_path / &quot;edits.jsonl&quot;
+    obs_file = tmp_path / &quot;obs.json&quot;
+    obs_file.write_text(json.dumps([obs(evidence=&quot;cut: 'Happy to jump on a call'&quot;)]),
+                        encoding=&quot;utf-8&quot;)
+
+    for draft_id in (&quot;d-1&quot;, &quot;d-2&quot;):
+        result = subprocess.run(
+            [sys.executable, str(root / &quot;scripts&quot; / &quot;edit_log.py&quot;), &quot;--record&quot;,
+             &quot;--draft-id&quot;, draft_id, &quot;--classification&quot;, &quot;edited&quot;,
+             &quot;--reviewed&quot;, REVIEWED, &quot;--observations-file&quot;, str(obs_file),
+             &quot;--log&quot;, str(log)],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stderr
+
+    result = subprocess.run(
+        [sys.executable, str(root / &quot;scripts&quot; / &quot;edit_log.py&quot;), &quot;--promotable&quot;,
+         &quot;--log&quot;, str(log)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    promoted = json.loads(result.stdout)
+    assert len(promoted) == 1
+    assert promoted[0][&quot;dimension&quot;] == &quot;hedging&quot;
+    assert promoted[0][&quot;count&quot;] == 2
+</code></pre>
+<ul>
+<li>[ ] <strong>Step 5: Run the whole suite</strong></li>
+</ul>
+<p>Run: <code>python -m pytest tests/ -q</code>
+Expected: all pass.</p>
+<ul>
+<li>[ ] <strong>Step 6: Document the loop in <code>README.md</code></strong></li>
+</ul>
+<p>Add a section after the ingestion-tiers section covering, in this order: that
+wam records the drafts it produces so it can learn from your edits; that it
+finds the sent version by searching your sent mail and asks rather than guesses
+when more than one message could be it; that only style edits update the
+profile, never factual corrections; that a change needs two independent edits
+before it is proposed, and every proposal is approved individually; and that
+learned lines are tagged with their provenance so you can tell them from
+corpus-measured ones.</p>
+<p>The privacy paragraph must state plainly: <code>~/.claude/wam/drafts.jsonl</code> holds the
+full text of drafts wam produced, is kept for 30 days and then dropped, and the
+sent messages fetched for comparison are never written to disk.</p>
+<ul>
+<li>[ ] <strong>Step 7: Commit</strong></li>
+</ul>
+<pre><code class="language-bash">git add skills/write-as-me/SKILL.md README.md .gitignore scripts/edit_log.py tests/test_edit_log.py
+git commit -m &quot;feat: review mode, provenance-tagged profile updates, and docs&quot;
+</code></pre>
+<hr />
+<h2>Self-Review Notes</h2>
+<p><strong>Spec coverage.</strong> Every spec section maps to a task: <code>drafts.jsonl</code> schema and
+retention → Task 1; matching, thresholds, missing-recipient rule → Task 2;
+<code>diff_draft.py</code> measurements, rewrite detection, fixtures → Task 3;
+<code>edits.jsonl</code>, closed vocabulary, promotion rule → Task 4; write-mode logging
+and the automatic check → Task 5; review mode, classification, profile
+provenance, conflict rule, README, <code>.gitignore</code> → Task 6. The error-handling
+table maps to: corrupt log (Task 1), ambiguous and no-match (Task 2), rewrite
+(Task 3), conflicting observations (Task 4), no connector and non-blocking
+check (Task 5), no profile (Task 6).</p>
+<p><strong>Deviation from the spec.</strong> The spec says an observation that fits no
+dimension is &quot;recorded under the nearest fitting dimension, or discarded&quot;.
+Task 6's Step 4 instructs dropping it rather than forcing a fit, and
+<code>validate_observation</code> raises rather than coercing. Forcing a poor fit
+manufactures evidence toward a promotion the user never signalled — the same
+failure class as write mode inventing an ask. Calling it out because a reader
+comparing spec to plan will notice the difference.</p>
+<p><strong>Independence rule made explicit.</strong> The spec says &quot;two independent
+observations&quot; without defining independence. The plan defines it as two
+<em>separate drafts</em>: two hedges cut from one email is one signal. <code>promotable</code>
+enforces this and <code>test_two_observations_from_the_same_draft_do_not_promote</code>
+covers it.</p>
+<p><strong>Type consistency.</strong> The draft record schema from Task 1 flows unchanged into
+Tasks 2, 3, and 5. <code>similarity</code> and <code>REWRITE_THRESHOLD</code> are defined in Task 2
+and consumed by Task 3. <code>aggregate</code> and <code>flatten</code> are consumed with their
+existing signatures and are not modified. <code>DIMENSIONS</code> is defined in Task 4 and
+quoted verbatim in Task 6's instructions.</p>
+
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral" });
+</script>
+</body>
+</html>
