@@ -147,6 +147,26 @@ def test_diff_classifies_a_replacement_as_rewritten():
     assert result["similarity"] < 0.25
 
 
+def test_mixed_fixture_pairs_the_hedge_and_the_figure_into_one_changed_entry():
+    """draft_mixed.json / sent_mixed.json fold a hedge cut and a factual
+    correction into a single sentence. diff_draft.py must keep that sentence
+    as one `changed` pair (not split it into removed/added), so downstream
+    review-mode classification has to split the content of one pair into
+    both buckets rather than assuming a changed pair carries one verdict."""
+    result = diff(load("draft_mixed.json"), load("sent_mixed.json"), baseline())
+    assert result["classification"] == "edited"
+    sentences = result["sentences"]
+    assert sentences["removed"] == []
+    assert sentences["added"] == []
+    assert len(sentences["changed"]) == 1
+    before, after = sentences["changed"][0]
+    assert "I just wanted to flag that" in before
+    assert "$4,200" in before
+    assert "I just wanted to flag that" not in after
+    assert "$4,250" in after
+    assert "$4,200" not in after
+
+
 def test_cli_writes_a_diff_file(tmp_path):
     out = tmp_path / "diff.json"
     result = subprocess.run(

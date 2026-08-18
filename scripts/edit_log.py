@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -137,11 +138,15 @@ def main() -> int:
                 return []
             return json.loads(Path(path).read_text(encoding="utf-8"))
 
-        record_edit(
-            args.draft_id, args.classification,
-            read_list(args.observations_file), read_list(args.factual_file),
-            reviewed=args.reviewed, path=log,
-        )
+        try:
+            record_edit(
+                args.draft_id, args.classification,
+                read_list(args.observations_file), read_list(args.factual_file),
+                reviewed=args.reviewed, path=log,
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         print(f"recorded {args.classification} for {args.draft_id}")
         return 0
 

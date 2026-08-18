@@ -183,3 +183,25 @@ def test_record_and_promotable_cli(tmp_path):
     assert len(promoted) == 1
     assert promoted[0]["dimension"] == "hedging"
     assert promoted[0]["count"] == 2
+
+
+def test_record_cli_reports_a_clean_error_for_an_invalid_observation(tmp_path):
+    """An unknown dimension must surface as a one-line message, not a raw
+    traceback -- review mode is user-facing, and record_edit already
+    guarantees nothing is written on a rejected observation."""
+    root = Path(__file__).parent.parent
+    log = tmp_path / "edits.jsonl"
+    obs_file = tmp_path / "bad_obs.json"
+    obs_file.write_text(json.dumps([obs(dimension="nonsense")]), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "edit_log.py"), "--record",
+         "--draft-id", "d-1", "--classification", "edited",
+         "--reviewed", REVIEWED, "--observations-file", str(obs_file),
+         "--log", str(log)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "Traceback" not in result.stderr
+    assert "unknown dimension" in result.stderr
+    assert not log.exists()

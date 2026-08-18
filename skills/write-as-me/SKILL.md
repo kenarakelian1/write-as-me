@@ -471,10 +471,36 @@ non-trivial metric delta, decide which of three buckets it belongs in:
   opener or signoff changed, a length cut, a structural change.
 - **Neutral** — typo fixes, whitespace, reformatting. Ignore.
 
-A single change can be both: "the vendor contract goes out on the 15th" →
-"on the 18th" is factual only, while "I just wanted to flag that staging is
-still on the old config" → "Staging is still on the old config" is voice only.
-Judge them separately.
+A single changed pair can be factual only, voice only, or both at once folded
+into one sentence. Three examples — none of these sentences appear in this
+skill's own fixtures, so treat them as illustrations of the rule, not answers
+to copy:
+
+- Factual only: "The renewal fee is $1,800" → "The renewal fee is $1,850" —
+  only the number moved; the phrasing is untouched.
+- Voice only: "I wanted to check in and see how things are progressing" →
+  "How's it going?" — nothing about the facts changed, only the phrasing and
+  length.
+- Both, in one sentence: "I just wanted to let you know the shipment left the
+  warehouse on the 9th" → "The shipment left the warehouse on the 11th." Two
+  verdicts live in that one changed pair: the hedge "I just wanted to let you
+  know" is cut (voice, dimension `hedging`), and the date moved from the 9th
+  to the 11th (factual, goes to `factual_changes` and never becomes a
+  directive). Record both. A single changed pair is not automatically a
+  single verdict — read every changed pair for both kinds of edit before
+  moving to the next one, even when it looks like one clean substitution.
+
+A metric delta is not automatically its own observation, separate from the
+sentence-level changes above. Check it against what you already classified:
+if a delta is fully explained by a sentence change you already recorded —
+cutting a closing-offer sentence also drops `word_count` and
+`paragraph_count`, but that is one edit, not three — do not log a second
+observation for it. A metric delta earns its own observation only when it
+reflects something the sentence diff does not already explain: a punctuation
+rate shifted across the whole email, a contraction-rate change, an opener or
+signoff swap with no corresponding sentence entry. Counting one edit twice
+hands promotion two votes for a single behavior, which quietly defeats the
+two-independent-drafts rule the rest of this design rests on.
 
 ### Step 4 — Record observations
 
