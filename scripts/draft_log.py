@@ -21,7 +21,7 @@ def _parse(stamp: str) -> datetime | None:
 def make_id(created: str, subject: str) -> str:
     """Stable id from the draft's own content, so the same draft never
     produces two records and tests do not need a clock or a random source."""
-    digest = hashlib.sha1(f"{created}|{subject}".encode("utf-8")).hexdigest()[:4]
+    digest = hashlib.sha1(f"{created}|{subject}".encode("utf-8")).hexdigest()[:8]
     parsed = _parse(created)
     day = parsed.strftime("%Y%m%d") if parsed else "00000000"
     return f"d-{day}-{digest}"
@@ -58,12 +58,14 @@ def load_drafts(path: Path = DEFAULT_LOG) -> list[dict]:
     if not path.exists():
         return []
     out = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            out.append(json.loads(line))
+            item = json.loads(line)
+            if isinstance(item, dict):
+                out.append(item)
         except json.JSONDecodeError:
             continue
     return out
@@ -79,11 +81,28 @@ def _rewrite(drafts: list[dict], path: Path) -> None:
 def set_status(draft_id: str, status: str, *, path: Path = DEFAULT_LOG) -> None:
     if status not in STATUSES:
         raise ValueError(f"unknown status {status!r}; expected one of {STATUSES}")
-    drafts = load_drafts(path)
-    for draft in drafts:
-        if draft.get("id") == draft_id:
-            draft["status"] = status
-    _rewrite(drafts, path)
+    lines = []
+    if path.exists():
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+
+    updated_lines = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+            if isinstance(record, dict) and record.get("id") == draft_id:
+                record["status"] = status
+            updated_lines.append(json.dumps(record) if isinstance(record, dict) else line)
+        except json.JSONDecodeError:
+            # Preserve corrupt lines
+            updated_lines.append(line)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(l + "\n" for l in updated_lines), encoding="utf-8"
+    )
 
 
 def expire_old(

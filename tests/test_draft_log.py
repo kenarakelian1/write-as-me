@@ -23,7 +23,7 @@ def test_make_id_is_deterministic_and_dated():
     b = make_id(CREATED, "Listings - what changes")
     assert a == b
     assert a.startswith("d-20260818-")
-    assert len(a) == len("d-20260818-") + 4
+    assert len(a) == len("d-20260818-") + 8
 
 
 def test_make_id_differs_by_subject():
@@ -84,3 +84,44 @@ def test_expire_old_ignores_unparseable_dates():
 def test_pending_filters_by_status():
     drafts = [{"id": "a", "status": "pending"}, {"id": "b", "status": "matched"}]
     assert [d["id"] for d in pending(drafts)] == ["a"]
+
+
+def test_load_skips_non_dict_json_values(tmp_path):
+    log = tmp_path / "drafts.jsonl"
+    good = json.dumps({"id": "d-1", "created": CREATED, "register": "client",
+                       "recipients": [], "subject": "s", "body": "b",
+                       "status": "pending"})
+    # Write a mix of valid dict, JSON scalar, and another valid dict
+    log.write_text(good + "\n42\n" + good + "\n", encoding="utf-8")
+    assert len(load_drafts(log)) == 2
+
+
+def test_load_with_utf8_bom(tmp_path):
+    log = tmp_path / "drafts.jsonl"
+    good = json.dumps({"id": "d-1", "created": CREATED, "register": "client",
+                       "recipients": [], "subject": "s", "body": "b",
+                       "status": "pending"})
+    # Write with UTF-8 BOM prefix
+    with log.open("w", encoding="utf-8-sig") as f:
+        f.write(good + "\n")
+    drafts = load_drafts(log)
+    assert len(drafts) == 1
+    assert drafts[0]["id"] == "d-1"
+
+
+def test_set_status_preserves_corrupt_lines(tmp_path):
+    log = tmp_path / "drafts.jsonl"
+    good = json.dumps({"id": "d-1", "created": CREATED, "register": "client",
+                       "recipients": [], "subject": "s", "body": "b",
+                       "status": "pending"})
+    garbage = "not json at all"
+    # Write a good record, then garbage, then another good record
+    log.write_text(good + "\n" + garbage + "\n", encoding="utf-8")
+    set_status("d-1", "matched", path=log)
+    content = log.read_text(encoding="utf-8")
+    # Garbage line should still be there
+    assert garbage in content
+    # First record should be updated
+    drafts = load_drafts(log)
+    assert len(drafts) == 1
+    assert drafts[0]["status"] == "matched"
