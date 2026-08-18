@@ -10,11 +10,17 @@ from pathlib import Path
 
 DEFAULT_LOG = Path.home() / ".claude" / "wam" / "drafts.jsonl"
 RETENTION_DAYS = 30
-STATUSES = ("pending", "matched", "expired", "ambiguous")
+# "expired" is deliberately not a reachable status: expire_old() below deletes
+# past-retention rows outright rather than marking them, so a real draft body
+# is never kept on disk past its retention window just to record that it
+# expired. If a status vocabulary is ever needed for expiry, add it back
+# alongside a rewrite of expire_old() to mark instead of delete.
+STATUSES = ("pending", "matched", "ambiguous")
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from ingest import shingles  # noqa: E402
+from jsonl import load_jsonl  # noqa: E402
 
 MATCH_THRESHOLD = 0.5
 REWRITE_THRESHOLD = 0.25
@@ -63,21 +69,9 @@ def record_draft(
 
 def load_drafts(path: Path = DEFAULT_LOG) -> list[dict]:
     """Corrupt lines are skipped, never raised — a damaged log must not take
-    write mode down with it."""
-    if not path.exists():
-        return []
-    out = []
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            item = json.loads(line)
-            if isinstance(item, dict):
-                out.append(item)
-        except json.JSONDecodeError:
-            continue
-    return out
+    write mode down with it. Thin wrapper over jsonl.load_jsonl so this
+    module's on-disk format and edit_log.py's stay identical by construction."""
+    return load_jsonl(path)
 
 
 def _rewrite(drafts: list[dict], path: Path) -> None:
@@ -223,6 +217,12 @@ def main() -> int:
     ap.add_argument("--body-file")
     ap.add_argument("--created", default="")
     ap.add_argument("--list-pending", action="store_true")
+    ap.add_argument("--get", action="store_true",
+                    help="print the full record (including body) for --draft-id")
+    ap.add_argument("--set-status", action="store_true",
+                    help="update the status of --draft-id to --status")
+    ap.add_argument("--draft-id", default="", help="for --get and --set-status")
+    ap.add_argument("--status", default="", help="for --set-status; one of STATUSES")
     ap.add_argument("--match", action="store_true")
     ap.add_argument("--draft-file", help="JSON draft record, for --match")
     ap.add_argument("--candidates-file", help="JSON list of sent messages, for --match")
@@ -237,6 +237,25 @@ def main() -> int:
         candidates = json.loads(Path(args.candidates_file).read_text(encoding="utf-8"))
         status, hits = find_match(draft, candidates)
         print(json.dumps({"status": status, "candidates": hits}, indent=2))
+        return 0
+
+    if args.get:
+        if not args.draft_id:
+            ap.error("--get requires --draft-id")
+        for draft in load_drafts(log):
+            if draft.get("id") == args.draft_id:
+                print(json.dumps(draft, indent=2))
+                return 0
+        print(f"error: no draft with id {args.draft_id!r}", file=sys.stderr)
+        return 1
+
+    if args.set_status:
+        if not args.draft_id:
+            ap.error("--set-status requires --draft-id")
+        if args.status not in STATUSES:
+            ap.error(f"--status must be one of {STATUSES}; got {args.status!r}")
+        set_status(args.draft_id, args.status, path=log)
+        print(f"{args.draft_id} -> {args.status}")
         return 0
 
     if args.record:
@@ -265,7 +284,8 @@ def main() -> int:
                               ("id", "created", "register", "recipients", "subject")}))
         return 0
 
-    ap.error("nothing to do: pass --record or --list-pending")
+    ap.error("nothing to do: pass --record, --list-pending, --get, "
+             "--set-status, or --match")
     return 2
 
 

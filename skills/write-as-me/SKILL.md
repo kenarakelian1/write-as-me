@@ -1,15 +1,17 @@
 ---
 name: write-as-me
-description: Use when the user wants email written in their own voice, wants to analyze their writing style, or asks to build or refresh a personal style profile. Triggers on "write as me", "in my voice", "sounds like me", "draft this email", "/wam".
+description: Use when the user wants email written in their own voice, wants to analyze their writing style, asks to build or refresh a personal style profile, or wants to review drafts they've sent and learn from their edits. Triggers on "write as me", "in my voice", "sounds like me", "draft this email", "review my drafts", "learn from my edits", "/wam", "/wam review".
 ---
 
 # write-as-me
 
-Two modes. Pick by whether the user supplied an intent.
+Three modes. Pick by whether the user supplied an intent, asked for a review,
+or neither.
 
 | Invocation | Mode |
 | --- | --- |
 | `/write-as-me` or `/wam`, no arguments | **Analyze** — build the style profile |
+| `/write-as-me review` or `/wam review` | **Review** — learn from edits made to sent drafts |
 | `/write-as-me <what to say>` | **Write** — draft using the existing profile |
 | `--refresh` present | **Analyze**, overwriting the existing profile |
 
@@ -411,40 +413,86 @@ Triggered by `/wam review`, or by the user accepting the pending-edit offer.
 If `~/.claude/wam/default.md` does not exist, there is nothing to update — say
 so and offer analyze mode instead.
 
+### Every intermediate file goes in `~/.claude/wam/tmp/`, never the project
+
+Review mode necessarily handles verbatim sent-mail text — the fetched sent
+message, the draft/candidate JSON handed to `--match`, and the diff file
+`diff_draft.py` writes all contain real sentences the user wrote. None of that
+may ever land in the user's working directory, the same rule the rest of this
+skill already follows for `~/.claude/wam/cache/`.
+
+Every temp file this mode creates (draft JSON, candidates JSON, sent-message
+JSON, the diff output) MUST be written under `~/.claude/wam/tmp/`, created if
+missing. At the end of a review run — including a run that stops early because
+the user declines, an `ambiguous` match is never resolved, or an error occurs —
+delete `~/.claude/wam/tmp/` entirely. Treat this cleanup as unconditional, the
+same way Analyze mode's Step 6 always deletes `~/.claude/wam/cache/`.
+
 ### Step 1 — Find the sent versions
 
-List pending drafts:
+List pending drafts. This call is intentionally compact — it feeds the
+one-line non-blocking check and must never pull draft bodies into context:
 
 ```bash
 python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --list-pending --now "<ISO-8601 NOW>"
 ```
 
-For each, search `in:sent` for its subject, restricted to messages sent after
-the draft's `created` timestamp and addressed to one of its recipients. Build
-each candidate as `{"subject", "body", "recipients", "date"}`, write the draft
-record and the candidate list to temp files, and let the matcher decide — do not
-decide by eye:
+Each line is `{"id", "created", "register", "recipients", "subject"}` —
+no `body`. Before matching, fetch the complete record for each pending draft,
+which includes the body that matching and diffing both need:
 
 ```bash
-python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --match   --draft-file <DRAFT JSON> --candidates-file <CANDIDATES JSON>
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --get --draft-id <ID>
 ```
+
+Then search `in:sent` for its subject, restricted to messages sent after the
+draft's `created` timestamp and addressed to one of its recipients. Build each
+candidate as `{"subject", "body", "recipients", "date"}` — all four keys,
+`body` populated with the full message text, not left out or empty. Write the
+draft record (from `--get`, unmodified) and the candidate list to
+`~/.claude/wam/tmp/draft-<ID>.json` and `~/.claude/wam/tmp/candidates-<ID>.json`,
+and let the matcher decide — do not decide by eye:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --match \
+  --draft-file ~/.claude/wam/tmp/draft-<ID>.json \
+  --candidates-file ~/.claude/wam/tmp/candidates-<ID>.json
+```
+
+A draft record with no `body` breaks matching silently rather than loudly: the
+fuzzy-body fallback (`similarity()` against an empty string) always scores
+0.0, so an edited-subject match that should fall back to the body simply never
+fires. Always use the `--get` output, never the compact `--list-pending` line,
+as the `--draft-file` input.
 
 It prints `{"status": ..., "candidates": [...]}` where status is `matched`,
 `ambiguous`, or `none`.
 
-- `matched` — proceed.
+- `matched` — proceed to Step 2 using the one candidate as the sent file.
 - `ambiguous` — show the user the candidate subjects and dates and ask which,
   if any. Never pick one yourself: learning from the wrong message teaches the
-  profile from someone else's writing.
+  profile from someone else's writing. If the user identifies one, proceed to
+  Step 2 with it. If none of the candidates is the right message, mark the
+  draft so it stops being re-offered:
+  ```bash
+  python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --set-status \
+    --draft-id <ID> --status ambiguous
+  ```
 - `none` — leave it `pending`. It expires on its own at 30 days. Say nothing.
 
 ### Step 2 — Measure the change
 
+`diff_draft.py`'s `--draft` and `--sent` files must each carry, at minimum,
+`subject` and `body` — the same shape `--get` and a Gmail-fetched sent message
+already produce. A record missing `body` fails with `KeyError: 'body'` rather
+than a readable error, so never hand it a `--list-pending` line or a
+partial record.
+
 ```bash
 python ${CLAUDE_PLUGIN_ROOT}/scripts/diff_draft.py \
-  --draft <DRAFT FILE> --sent <SENT FILE> \
+  --draft ~/.claude/wam/tmp/draft-<ID>.json --sent ~/.claude/wam/tmp/sent-<ID>.json \
   --baseline ${CLAUDE_PLUGIN_ROOT}/fixtures/baseline_ngrams.json \
-  --out <DIFF FILE>
+  --out ~/.claude/wam/tmp/diff-<ID>.json
 ```
 
 If `classification` is `rewritten`, record it and derive nothing:
@@ -454,9 +502,11 @@ python ${CLAUDE_PLUGIN_ROOT}/scripts/edit_log.py --record \
   --draft-id <ID> --classification rewritten --reviewed "<ISO-8601 NOW>"
 ```
 
-Then tell the user plainly that they replaced rather than edited that draft, and
-that a run of rewrites means the profile is wrong at the root — re-running
-analyze mode will serve them better than incremental learning.
+Then mark the draft `matched` (it has been reviewed and resolved, even though
+no observations came out of it) — same command as Step 6 — and tell the user
+plainly that they replaced rather than edited that draft, and that a run of
+rewrites means the profile is wrong at the root — re-running analyze mode
+will serve them better than incremental learning.
 
 ### Step 3 — Classify every change
 
@@ -549,6 +599,18 @@ Provenance is required. A directive resting on two edits is weaker evidence than
 one resting on the whole corpus, and the profile must not present them as equal.
 The tag also lets the user strip learned lines wholesale if the loop drifts.
 
-Then mark each reviewed draft `matched`, and report: how many drafts were
-reviewed, how many changes were factual, how many observations were recorded,
-and how many are still short of promotion.
+Then mark each reviewed draft `matched`, one call per draft:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --set-status \
+  --draft-id <ID> --status matched
+```
+
+This is not optional bookkeeping: without it the draft stays `pending`
+forever, the pending-edit check re-nags about it for the rest of its 30-day
+retention window, and reviewing it again would append duplicate observations
+to `edits.jsonl`.
+
+Finally, delete `~/.claude/wam/tmp/` (see the note at the top of this mode),
+and report: how many drafts were reviewed, how many changes were factual, how
+many observations were recorded, and how many are still short of promotion.

@@ -379,6 +379,98 @@ def test_record_cli_requires_created(tmp_path):
     assert not log.exists()
 
 
+def test_set_status_cli_updates_status(tmp_path):
+    """Finding 2 (final whole-branch review): set_status() existed but no CLI
+    flag exposed it, so nothing outside the tests could ever call it and a
+    reviewed draft stayed 'pending' forever. --set-status must actually
+    rewrite the record on disk."""
+    root = Path(__file__).parent.parent
+    log = tmp_path / "drafts.jsonl"
+    draft_id = record_draft("client", [], "one", "b", created=CREATED, path=log)
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "draft_log.py"), "--set-status",
+         "--draft-id", draft_id, "--status", "matched", "--log", str(log)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    by_id = {d["id"]: d for d in load_drafts(log)}
+    assert by_id[draft_id]["status"] == "matched"
+
+
+def test_set_status_cli_rejects_an_unknown_status(tmp_path):
+    root = Path(__file__).parent.parent
+    log = tmp_path / "drafts.jsonl"
+    draft_id = record_draft("client", [], "one", "b", created=CREATED, path=log)
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "draft_log.py"), "--set-status",
+         "--draft-id", draft_id, "--status", "expired", "--log", str(log)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "--status must be one of" in result.stderr
+    by_id = {d["id"]: d for d in load_drafts(log)}
+    assert by_id[draft_id]["status"] == "pending"
+
+
+def test_set_status_cli_requires_draft_id(tmp_path):
+    root = Path(__file__).parent.parent
+    log = tmp_path / "drafts.jsonl"
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "draft_log.py"), "--set-status",
+         "--status", "matched", "--log", str(log)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "--set-status requires --draft-id" in result.stderr
+
+
+def test_get_cli_prints_the_full_record_including_body(tmp_path):
+    """Finding 3: --list-pending is compact by design (id/created/register/
+    recipients/subject, no body), and that was the only documented way to
+    fetch a draft. Without a body, find_match()'s fuzzy fallback silently
+    never fires (similarity("", body) == 0.0) and diff_draft.py dies with
+    KeyError: 'body'. --get must return the complete record."""
+    root = Path(__file__).parent.parent
+    log = tmp_path / "drafts.jsonl"
+    draft_id = record_draft(
+        "client", ["caden@example.com"], "Listings", "Caden,\n\nBody text here.",
+        created=CREATED, path=log,
+    )
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "draft_log.py"), "--get",
+         "--draft-id", draft_id, "--log", str(log)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    record = json.loads(result.stdout)
+    assert record["id"] == draft_id
+    assert record["body"] == "Caden,\n\nBody text here."
+    assert record["subject"] == "Listings"
+
+
+def test_get_cli_errors_cleanly_for_an_unknown_draft_id(tmp_path):
+    root = Path(__file__).parent.parent
+    log = tmp_path / "drafts.jsonl"
+    record_draft("client", [], "one", "b", created=CREATED, path=log)
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "draft_log.py"), "--get",
+         "--draft-id", "d-nonexistent", "--log", str(log)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "Traceback" not in result.stderr
+    assert "no draft with id" in result.stderr
+
+
+def test_statuses_does_not_include_expired():
+    """Finding 6: expire_old() deletes past-retention rows outright rather
+    than marking them, so 'expired' can never actually occur as a status.
+    The vocabulary must match reality."""
+    from draft_log import STATUSES
+    assert "expired" not in STATUSES
+    assert set(STATUSES) == {"pending", "matched", "ambiguous"}
+
+
 def test_record_cli_requires_body_file(tmp_path):
     """Without --body-file, the draft is recorded with an empty body, which
     carries no content to diff against the sent version later. Refuse it."""

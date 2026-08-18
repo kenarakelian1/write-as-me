@@ -104,9 +104,18 @@ drifts.
 
 Privacy for this loop works the same way as the rest of wam:
 `~/.claude/wam/drafts.jsonl` holds the full text of the drafts wam produced,
-kept for 30 days and then dropped automatically. The sent messages fetched
-for comparison are never written to disk — they exist only for the length of
-the review and are discarded afterward.
+kept for 30 days and then dropped automatically. The sent message fetched for
+comparison, the candidate list handed to the matcher, and the diff between
+draft and sent text are all written briefly to `~/.claude/wam/tmp/` — never
+into the project working directory — and that directory is deleted at the
+end of every review run, including a run that stops early.
+
+The scripts behind this loop (`draft_log.py`, `diff_draft.py`, `edit_log.py`)
+are covered by the automated test suite, but the Gmail search, the
+draft-to-sent matching, and `/wam review` itself have not been exercised end
+to end against a real mailbox — no subagent can drive an interactive slash
+command, so this loop has only been verified one script at a time, not as a
+whole.
 
 ## Privacy
 

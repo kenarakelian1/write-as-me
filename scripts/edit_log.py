@@ -8,6 +8,10 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+
+from jsonl import load_jsonl  # noqa: E402
+
 DEFAULT_LOG = Path.home() / ".claude" / "wam" / "edits.jsonl"
 PROMOTION_THRESHOLD = 2
 
@@ -64,20 +68,10 @@ def record_edit(
 
 
 def load_edits(path: Path = DEFAULT_LOG) -> list[dict]:
-    if not path.exists():
-        return []
-    out = []
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            item = json.loads(line)
-            if isinstance(item, dict):
-                out.append(item)
-        except json.JSONDecodeError:
-            continue
-    return out
+    """Thin wrapper over jsonl.load_jsonl so this module's on-disk format and
+    draft_log.py's stay identical by construction, rather than by two
+    hand-copied implementations drifting apart."""
+    return load_jsonl(path)
 
 
 def promotable(edits: list[dict], threshold: int = PROMOTION_THRESHOLD) -> list[dict]:
