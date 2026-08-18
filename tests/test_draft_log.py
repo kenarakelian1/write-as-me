@@ -298,3 +298,63 @@ def test_message_qualifying_both_ways_counts_once():
     status, hits = find_match(DRAFT, sent)
     assert status == "matched"
     assert len(hits) == 1
+
+
+import subprocess
+
+
+def test_record_cli_writes_an_entry(tmp_path):
+    root = Path(__file__).parent.parent
+    log = tmp_path / "drafts.jsonl"
+    body = tmp_path / "body.txt"
+    body.write_text("Caden,\n\nBody with \"quotes\" and\nnewlines.", encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "draft_log.py"), "--record",
+         "--register", "client", "--recipients", "caden@example.com",
+         "--subject", "Listings", "--body-file", str(body),
+         "--created", CREATED, "--log", str(log)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    drafts = load_drafts(log)
+    assert len(drafts) == 1
+    assert drafts[0]["body"].endswith("newlines.")
+    assert result.stdout.strip() == drafts[0]["id"]
+
+
+def test_list_pending_cli_applies_retention(tmp_path):
+    root = Path(__file__).parent.parent
+    log = tmp_path / "drafts.jsonl"
+    record_draft("client", [], "old", "b", created="2026-07-01T00:00:00-04:00",
+                 path=log)
+    record_draft("client", [], "new", "b", created="2026-08-17T00:00:00-04:00",
+                 path=log)
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "draft_log.py"), "--list-pending",
+         "--now", "2026-08-18T00:00:00-04:00", "--log", str(log)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "new" in result.stdout
+    assert "old" not in result.stdout
+    assert len(load_drafts(log)) == 1
+
+
+def test_match_cli_reports_status_and_candidates(tmp_path):
+    root = Path(__file__).parent.parent
+    draft_file = tmp_path / "draft.json"
+    cand_file = tmp_path / "candidates.json"
+    draft_file.write_text(json.dumps(DRAFT), encoding="utf-8")
+    cand_file.write_text(
+        json.dumps([_sent("Listings - what changes", DRAFT["body"])]),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "draft_log.py"), "--match",
+         "--draft-file", str(draft_file), "--candidates-file", str(cand_file)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "matched"
+    assert len(payload["candidates"]) == 1

@@ -13,6 +13,28 @@ Two modes. Pick by whether the user supplied an intent.
 | `/write-as-me <what to say>` | **Write** — draft using the existing profile |
 | `--refresh` present | **Analyze**, overwriting the existing profile |
 
+## Before either mode — the pending-edit check
+
+Run once at the start of every invocation, before doing what the user asked:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --list-pending --now "<ISO-8601 NOW>"
+```
+
+For each pending draft, check whether it has since been sent (see review mode's
+matching step). If any have, say **exactly one line** and then carry on with the
+user's actual request:
+
+> 2 drafts you sent have edits I haven't learned from — review them?
+
+Rules:
+- Never block. The user asked for something; this check does not get to
+  postpone it.
+- If they decline, do not raise it again in this session.
+- If no Gmail tools are available, say once that the edit loop cannot run
+  without them, and never mention it again.
+- If `drafts.jsonl` is missing or unreadable, treat it as empty and say nothing.
+
 Profiles live in `~/.claude/wam/`. Never write a profile into a repository.
 
 All scripts and fixtures this skill uses live inside the plugin, not the user's
@@ -360,3 +382,24 @@ create the draft without being asked.
 
 **Never send email.** Creating a draft is the furthest this skill goes, and only when
 the user explicitly asks for one.
+
+### Step 6 — Log the draft
+
+After presenting, record it so review mode can find the sent version later:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --record \
+  --register <REGISTER> --recipients "<COMMA SEPARATED>" \
+  --subject "<SUBJECT>" --body-file <TEMP FILE> --created "<ISO-8601 NOW>"
+```
+
+Write the body to a temp file rather than passing it as an argument — draft
+bodies contain newlines and quotes that do not survive a shell argument.
+
+If the recipient was never supplied and the draft uses the `Hi [Name],`
+placeholder, pass `--recipients ""`. Review mode will then require an exact
+subject match, which is the safe behaviour when there is no recipient to
+disambiguate with.
+
+Logging is best-effort: if it fails, say so in one line and move on. A failed
+log must never cost the user the draft they asked for.

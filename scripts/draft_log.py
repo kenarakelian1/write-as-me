@@ -1,6 +1,7 @@
 """Record of the drafts write-as-me produced, so review mode can find them later."""
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import sys
@@ -211,3 +212,58 @@ def find_match(draft: dict, sent: list[dict]) -> tuple[str, list[dict]]:
     if not candidates:
         return ("none", [])
     return ("ambiguous", candidates) if len(candidates) > 1 else ("matched", candidates)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Record and inspect drafts.")
+    ap.add_argument("--record", action="store_true")
+    ap.add_argument("--register", default="")
+    ap.add_argument("--recipients", default="")
+    ap.add_argument("--subject", default="")
+    ap.add_argument("--body-file")
+    ap.add_argument("--created", default="")
+    ap.add_argument("--list-pending", action="store_true")
+    ap.add_argument("--match", action="store_true")
+    ap.add_argument("--draft-file", help="JSON draft record, for --match")
+    ap.add_argument("--candidates-file", help="JSON list of sent messages, for --match")
+    ap.add_argument("--now", default="", help="ISO-8601; drives retention")
+    ap.add_argument("--log", default=str(DEFAULT_LOG))
+    args = ap.parse_args()
+
+    log = Path(args.log)
+
+    if args.match:
+        draft = json.loads(Path(args.draft_file).read_text(encoding="utf-8"))
+        candidates = json.loads(Path(args.candidates_file).read_text(encoding="utf-8"))
+        status, hits = find_match(draft, candidates)
+        print(json.dumps({"status": status, "candidates": hits}, indent=2))
+        return 0
+
+    if args.record:
+        body = Path(args.body_file).read_text(encoding="utf-8") if args.body_file else ""
+        recipients = [r.strip() for r in args.recipients.split(",") if r.strip()]
+        draft_id = record_draft(
+            args.register, recipients, args.subject, body,
+            created=args.created, path=log,
+        )
+        print(draft_id)
+        return 0
+
+    if args.list_pending:
+        drafts = load_drafts(log)
+        if args.now:
+            kept = expire_old(drafts, args.now)
+            if len(kept) != len(drafts):
+                _rewrite(kept, log)
+                drafts = kept
+        for draft in pending(drafts):
+            print(json.dumps({k: draft[k] for k in
+                              ("id", "created", "register", "recipients", "subject")}))
+        return 0
+
+    ap.error("nothing to do: pass --record or --list-pending")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
