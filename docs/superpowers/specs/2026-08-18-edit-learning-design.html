@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>write-as-me — Edit-Learning Loop Design Spec</title>
+<style>
+:root {
+  --ink: #1a1a1a; --muted: #5c5c5c; --rule: #e0ddd6;
+  --bg: #fdfcfa; --accent: #7a3e2f; --code-bg: #f4f2ed;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #e8e6e1; --muted: #a8a49c; --rule: #35322c;
+    --bg: #16151300; --bg: #161513; --accent: #d99a7f; --code-bg: #211f1c;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 4rem 1.5rem 8rem;
+  background: var(--bg); color: var(--ink);
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-size: 18px; line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+main { max-width: 44rem; margin: 0 auto; }
+h1, h2, h3, h4 {
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  line-height: 1.25; font-weight: 600; margin: 2.5em 0 0.6em;
+}
+h1 { font-size: 2.1rem; margin-top: 0; letter-spacing: -0.02em; }
+h2 { font-size: 1.4rem; padding-bottom: 0.3em; border-bottom: 1px solid var(--rule); }
+h3 { font-size: 1.12rem; }
+h4 { font-size: 1rem; color: var(--muted); }
+p, ul, ol { margin: 0 0 1.15em; }
+li { margin-bottom: 0.35em; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+hr { border: 0; border-top: 1px solid var(--rule); margin: 3em 0; }
+blockquote {
+  margin: 0 0 1.15em; padding-left: 1.2em;
+  border-left: 3px solid var(--rule); color: var(--muted);
+}
+code {
+  font-family: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  font-size: 0.85em; background: var(--code-bg);
+  padding: 0.15em 0.4em; border-radius: 3px;
+}
+pre {
+  background: var(--code-bg); padding: 1.1em 1.3em; border-radius: 6px;
+  overflow-x: auto; font-size: 0.85rem; line-height: 1.5;
+  border: 1px solid var(--rule);
+}
+pre code { background: none; padding: 0; font-size: 1em; }
+table {
+  width: 100%; border-collapse: collapse; margin: 0 0 1.5em;
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif; font-size: 0.9rem;
+}
+th, td { text-align: left; padding: 0.55em 0.8em; border-bottom: 1px solid var(--rule); }
+th { font-weight: 600; border-bottom-width: 2px; }
+.mermaid { margin: 2em 0; text-align: center; }
+@media print {
+  body { background: #fff; color: #000; font-size: 11pt; padding: 0; }
+  h2 { page-break-after: avoid; }
+  pre, table, blockquote { page-break-inside: avoid; }
+  a { color: #000; text-decoration: none; }
+}
+</style>
+</head>
+<body>
+<main>
+<h1>write-as-me — Edit-Learning Loop Design Spec</h1>
+<p><strong>Date:</strong> 2026-08-18
+<strong>Status:</strong> Approved for planning
+<strong>Repo:</strong> <code>write-as-me</code>
+<strong>Builds on:</strong> <code>docs/superpowers/specs/2026-08-16-write-as-me-design.md</code></p>
+<h2>Summary</h2>
+<p>Close the loop between what write-as-me drafts and what the user actually sends.</p>
+<p>Today the profile is written once by analyze mode and never changes. Every time
+the user edits a draft before sending it, they produce the clearest available
+signal about how they want to sound — and that signal is discarded.</p>
+<p>This adds a third mode: wam records the drafts it produces, later finds the sent
+version in Gmail, measures what changed, separates voice edits from factual
+corrections, and proposes profile changes once a pattern repeats.</p>
+<h2>Goals</h2>
+<ol>
+<li>Learn from edits without the user having to remember the feature exists.</li>
+<li>Never overfit. One edit is not a pattern; a directive reaching the profile
+must be supported by at least two independent observations.</li>
+<li>Never confuse a factual correction with a voice signal.</li>
+<li>Never guess which sent message corresponds to a draft. A wrong match teaches
+the profile from someone else's writing.</li>
+<li>Add no second copy of the user's mail to disk.</li>
+</ol>
+<h2>Non-goals</h2>
+<ul>
+<li>Automatic profile edits. Every change is proposed and approved individually.</li>
+<li>Learning from mail wam did not draft. That is analyze mode's job.</li>
+<li>Learning from a total rewrite. See &quot;Rewrite detection&quot; below.</li>
+<li>Retroactive learning from drafts produced before this feature shipped.</li>
+</ul>
+<h2>Architecture</h2>
+<p>Deterministic measurement in Python; interpretation in the model — the same
+split the rest of the product uses.</p>
+<pre><code>write mode --&gt; drafts.jsonl (pending)
+                    |
+            review mode: search in:sent, match
+                    |
+              diff_draft.py --&gt; deltas + sentence diff
+                    |
+        model: classify voice / factual / neutral
+                    |
+              edits.jsonl (observations + evidence)
+                    |
+        2+ observations, same direction --&gt; propose
+                    |
+              user approves --&gt; profile updated, tagged
+</code></pre>
+<h3>New files</h3>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Responsibility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>scripts/diff_draft.py</code></td>
+<td>Measure draft vs. sent: metric deltas + sentence-level diff</td>
+</tr>
+<tr>
+<td><code>~/.claude/wam/drafts.jsonl</code></td>
+<td>Append-only record of drafts wam produced</td>
+</tr>
+<tr>
+<td><code>~/.claude/wam/edits.jsonl</code></td>
+<td>Voice observations with evidence, awaiting promotion</td>
+</tr>
+</tbody>
+</table>
+<p>Both state files live outside any repository and are covered by <code>.gitignore</code>
+defensively.</p>
+<h2>State</h2>
+<h3><code>drafts.jsonl</code></h3>
+<p>One JSON object per line, appended when write mode presents a draft. Fields:
+<code>id</code>, <code>created</code> (ISO-8601), <code>register</code>, <code>recipients</code> (list), <code>subject</code>, <code>body</code>,
+and <code>status</code>.</p>
+<p><code>status</code> is one of <code>pending</code>, <code>matched</code>, <code>expired</code>, <code>ambiguous</code>.</p>
+<p><strong>Retention: 30 days.</strong> Entries older than that are dropped on the next review
+run regardless of status. The file holds real draft bodies; it is not an archive.</p>
+<h3><code>edits.jsonl</code></h3>
+<p>One object per reviewed draft. Fields: <code>draft_id</code>, <code>reviewed</code> (ISO-8601),
+<code>classification</code> (<code>edited</code> or <code>rewritten</code>), <code>observations</code>, and
+<code>factual_changes</code>.</p>
+<p>Each observation carries three fields: <code>dimension</code>, <code>direction</code>, and <code>evidence</code>
+— the verbatim text that was cut, added, or changed.</p>
+<p><strong><code>dimension</code> is a closed vocabulary</strong>, not free text. Promotion works by
+counting observations that share a dimension and a direction, so free-text
+labels would silently never match each other (&quot;hedging&quot; and &quot;hedges&quot; would look
+like two unrelated observations and nothing would ever reach two). The permitted
+values are exactly:</p>
+<p><code>length</code>, <code>hedging</code>, <code>opener</code>, <code>signoff</code>, <code>ask_placement</code>, <code>structure</code>,
+<code>punctuation</code>, <code>contractions</code>, <code>formality</code>, <code>closing_offer</code>.</p>
+<p><code>direction</code> is one of <code>reduce</code>, <code>increase</code>, or <code>replace:&lt;value&gt;</code> for dimensions
+where the change is categorical rather than directional (an opener or signoff
+form). An observation that does not fit the vocabulary is recorded under the
+nearest fitting dimension, or discarded if none fits — the vocabulary is not
+extended silently at runtime.</p>
+<p><code>factual_changes</code> is a list of plain strings recorded for the user's benefit. It
+never influences the profile.</p>
+<h2>Matching a draft to its sent message</h2>
+<p>The step most likely to go wrong, so it fails closed.</p>
+<ol>
+<li>Search <code>in:sent</code> for the draft's subject, restricted to messages sent after
+<code>created</code> and addressed to the same recipient. Exact subject + recipient +
+time window is a confident match.</li>
+<li>If the subject was edited, fall back to body similarity using the same 5-word
+shingle Jaccard <code>dedupe()</code> already uses, over the same recipient and window.
+<strong>Threshold 0.5</strong> — lower than dedupe's 0.70 because an edited draft is
+expected to differ substantially, and the recipient plus time window are
+already doing most of the disambiguation.</li>
+<li>If the draft was presented with a <code>[Name]</code> placeholder and no recipient was
+ever supplied, <code>recipients</code> is empty. Match on subject and time window alone,
+and require an exact subject — the recipient was doing most of the
+disambiguation, so without it the shingle fallback is not safe to use.</li>
+<li>Exactly one candidate → <code>matched</code>.</li>
+<li>Two or more candidates → <code>ambiguous</code>; ask the user which, never guess.</li>
+<li>No candidate after 30 days → <code>expired</code>, silently. The user decided not to
+send it, and that is not a failure worth reporting.</li>
+</ol>
+<p>The fetched sent message is held in memory for the duration of the diff and is
+never written to disk. Only derived observations persist.</p>
+<h3>Rewrite detection</h3>
+<p>If shingle similarity between draft and sent version is <strong>below 0.25</strong>, the user
+did not edit the draft — they replaced it. Record <code>classification: rewritten</code>
+and derive no observations.</p>
+<p>A rewrite is arguably the strongest possible signal, but it is not expressible
+as a delta: there is no &quot;removed hedge&quot; to point at, only two different emails.
+Treating it as a pile of voice observations would flood <code>edits.jsonl</code> with noise
+from a single message. Rewrites are surfaced in the review summary so the user
+can see the count, and the right response to a run of them is re-running analyze
+mode, not incremental learning.</p>
+<h2>What <code>diff_draft.py</code> measures</h2>
+<p>CLI: <code>python scripts/diff_draft.py --draft FILE --sent FILE --baseline FILE --out FILE</code>, emitting JSON.</p>
+<p><strong>Structural</strong> — word count absolute and percent change; sentence count;
+paragraph count; opener pattern before and after; signoff phrase and name form
+before and after; whether the subject changed, and both values.</p>
+<p><strong>Metric deltas</strong>, computed by reusing <code>aggregate()</code> on each version —
+contraction rate, every punctuation tic, hedges per 100 words, imperative rate,
+question rate, bullet rate, ask placement.</p>
+<p><strong>Sentence-level diff</strong> via <code>difflib.SequenceMatcher</code> over sentences from
+<code>sentences()</code>, producing three lists: <code>removed</code>, <code>added</code>, <code>changed</code>.</p>
+<p>The sentence diff is the highest-value output. A removed sentence is directly
+interpretable in a way no aggregate is: cutting &quot;Happy to send the full
+breakdown if it's useful&quot; is actionable; &quot;bullet rate fell 0.04&quot; is not.</p>
+<h2>Review mode</h2>
+<p>Invoked as <code>/wam review</code>, and offered automatically.</p>
+<p><strong>Automatic check.</strong> At the start of any <code>/wam</code> invocation, read <code>drafts.jsonl</code>
+for <code>pending</code> entries and check whether any have been sent. If so, print exactly
+one line — &quot;2 drafts you sent have edits I haven't learned from — review them?&quot;
+— and then do what the user actually asked. The check never blocks the request
+it interrupted, and declining is not re-asked in the same session.</p>
+<p>If no Gmail connector is available, say so once and never raise it again.</p>
+<p><strong>Per matched draft:</strong></p>
+<ol>
+<li>Run <code>diff_draft.py</code>.</li>
+<li>Classify every change as <strong>voice</strong>, <strong>factual</strong>, or <strong>neutral</strong>:
+<ul>
+<li><em>Factual</em> — numbers, names, dates, links, or content wam could not have
+known. Recorded in <code>factual_changes</code>, never promoted.</li>
+<li><em>Voice</em> — a hedge removed, a sentence cut with no informational loss, an
+opener or signoff changed, a length cut, a structural change.</li>
+<li><em>Neutral</em> — typo fixes, whitespace, reformatting.</li>
+</ul>
+</li>
+<li>Append observations with verbatim evidence to <code>edits.jsonl</code>.</li>
+<li>Scan <code>edits.jsonl</code> for any dimension with <strong>two or more observations in the
+same direction</strong>. Only those are proposed.</li>
+<li>Present each proposed profile change on its own, with both pieces of
+evidence, and ask. One approval per change — never a batch yes.</li>
+</ol>
+<h2>Profile updates</h2>
+<p>Approved changes are written into <code>~/.claude/wam/default.md</code> with provenance:</p>
+<pre><code class="language-markdown">- Cut the closing offer sentence; you delete it. (learned from 2 edits, 2026-08-18)
+</code></pre>
+<p><strong>Provenance is required.</strong> A directive resting on two edits is weaker evidence
+than one resting on 1,900 words of corpus, and the profile must not present them
+as equally solid. The tag also lets the user strip learned lines wholesale if the
+loop drifts.</p>
+<p><strong>Conflict rule.</strong> When an edit observation contradicts a corpus-measured
+directive, the proposal states the conflict explicitly and shows both figures.
+Two edits do not silently overrule sixteen emails; the user decides.</p>
+<h2>Error handling</h2>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No Gmail connector</td>
+<td>Say once that the loop cannot run; never raise again</td>
+</tr>
+<tr>
+<td>Draft never sent</td>
+<td><code>expired</code> at 30 days, silently</td>
+</tr>
+<tr>
+<td>Subject edited</td>
+<td>Shingle fallback at 0.5</td>
+</tr>
+<tr>
+<td>Two or more candidates</td>
+<td><code>ambiguous</code>; ask which, never guess</td>
+</tr>
+<tr>
+<td>Similarity below 0.25</td>
+<td><code>rewritten</code>; record, derive nothing</td>
+</tr>
+<tr>
+<td>No profile exists</td>
+<td>Review mode unavailable; offer analyze mode</td>
+</tr>
+<tr>
+<td><code>drafts.jsonl</code> missing or corrupt</td>
+<td>Treat as empty; warn once; do not crash write mode</td>
+</tr>
+<tr>
+<td>Observations conflict with each other</td>
+<td>No promotion; both retained as evidence</td>
+</tr>
+</tbody>
+</table>
+<h2>Testing</h2>
+<p><strong>Fixtures.</strong> A synthetic draft/sent pair for persona Dana Reyes with known
+deltas — a hedge removed, a closing sentence cut, one figure corrected — so the
+voice-versus-factual split is testable without real mail.</p>
+<p><strong>Unit tests (pytest, deterministic).</strong></p>
+<ul>
+<li><code>test_diff_draft.py</code> — every structural and metric delta against hand-computed
+values; sentence diff produces the expected removed/added/changed lists.</li>
+<li>Matching — exact subject; edited subject via shingles; ambiguous candidates;
+no match; rewrite below 0.25.</li>
+<li>Promotion — one observation does not promote; two in the same direction do;
+two in opposite directions do not.</li>
+<li>Retention — entries older than 30 days are dropped.</li>
+<li>Privacy — the sent body never appears in <code>edits.jsonl</code>.</li>
+</ul>
+<h2>Out of scope for v1</h2>
+<p>Learning from drafts wam did not produce; automatic profile edits without
+approval; learning from rewrites; cross-profile learning; any UI beyond chat.</p>
+
+</main>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+mermaid.initialize({ startOnLoad: true, theme: dark ? "dark" : "neutral" });
+</script>
+</body>
+</html>
