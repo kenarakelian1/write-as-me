@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 from diff_draft import (  # noqa: E402
     diff,
     metric_deltas,
+    metrics_one_sided,
     sentence_diff,
     structural_deltas,
 )
@@ -52,6 +53,31 @@ def test_sentence_diff_on_the_fixture_pair_finds_the_cut_offer():
     assert "Happy to jump on a call" in joined
 
 
+def test_sentence_diff_does_not_marry_unrelated_sentences_on_reorder_plus_edit():
+    # Reviewer-reported case: a reorder that coincides with an edit on both
+    # sides must not pair sentences positionally within the replace block.
+    draft_body = "Cats are great animals. Dogs need long walks daily."
+    sent_body = "Dogs need long walks daily and treats. Cats are wonderful animals."
+    result = sentence_diff(draft_body, sent_body)
+    assert result["changed"] == [
+        ["Cats are great animals.", "Cats are wonderful animals."],
+        ["Dogs need long walks daily.", "Dogs need long walks daily and treats."],
+    ]
+    assert result["removed"] == []
+    assert result["added"] == []
+
+
+def test_sentence_diff_sends_an_unmatched_sentence_to_removed_and_added():
+    # No candidate on either side clears the similarity floor for one of the
+    # pairs, so it must not be forced into a "changed" pairing.
+    draft_body = "Alpha bravo charlie. Delta echo foxtrot."
+    sent_body = "Alpha bravo charlie modified. Completely different unrelated sentence."
+    result = sentence_diff(draft_body, sent_body)
+    assert result["changed"] == [["Alpha bravo charlie.", "Alpha bravo charlie modified."]]
+    assert result["removed"] == ["Delta echo foxtrot."]
+    assert result["added"] == ["Completely different unrelated sentence."]
+
+
 def test_structural_deltas_report_the_length_cut():
     result = structural_deltas(load("draft.json"), load("sent.json"))
     assert result["word_count_delta"] < 0
@@ -76,6 +102,31 @@ def test_metric_deltas_are_sent_minus_draft():
     same = load("draft.json")
     result = metric_deltas(same, same, baseline())
     assert all(abs(v) < 1e-9 for v in result.values())
+
+
+def test_metrics_one_sided_reports_an_opener_category_present_on_only_one_side():
+    draft = {"subject": "Status", "body": "Dana -\n\nThe report is finished."}
+    sent = {"subject": "Status", "body": "Hi Priya,\n\nThe report is finished."}
+    result = metrics_one_sided(draft, sent, baseline())
+    assert result["openers.name_dash"] == {"draft": 1.0, "sent": None}
+    assert result["openers.hi_name"] == {"draft": None, "sent": 1.0}
+    intersection = metric_deltas(draft, sent, baseline())
+    assert "openers.name_dash" not in intersection
+    assert "openers.hi_name" not in intersection
+
+
+def test_metrics_one_sided_reports_ask_placement_present_on_only_one_side():
+    draft = {
+        "subject": "Status",
+        "body": "The report is finished. Everything looks good on our end.",
+    }
+    sent = {
+        "subject": "Status",
+        "body": "Can you confirm receipt by Friday? Everything looks good on our end.",
+    }
+    result = metrics_one_sided(draft, sent, baseline())
+    assert result["ask_placement_median"] == {"draft": None, "sent": 0.0}
+    assert "ask_placement_median" not in metric_deltas(draft, sent, baseline())
 
 
 def test_diff_classifies_the_fixture_pair_as_edited():
@@ -109,4 +160,4 @@ def test_cli_writes_a_diff_file(tmp_path):
     assert result.returncode == 0, result.stderr
     data = json.loads(out.read_text(encoding="utf-8"))
     assert set(data) == {"classification", "similarity", "structural",
-                         "metrics", "sentences"}
+                         "metrics", "metrics_one_sided", "sentences"}

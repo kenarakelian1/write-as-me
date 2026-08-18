@@ -22,6 +22,28 @@ from fingerprint import (  # noqa: E402
 )
 
 
+# Floor for pairing two sentences inside a difflib "replace" block as a
+# "changed" pair, on lowercased word-set Jaccard similarity. Below this, the
+# old sentence is a removal and the new sentence is an addition rather than
+# a fabricated pairing: difflib's replace opcode only tells us a block of
+# old sentences was swapped for a block of new ones, not which old sentence
+# corresponds to which new one, so pairing by position alone can marry two
+# unrelated sentences whenever a reorder coincides with an edit. Wrongly
+# calling something "removed" and "added" is recoverable by a downstream
+# reader; a wrong pairing masquerading as one edited sentence is not.
+PAIR_SIMILARITY_FLOOR = 0.3
+
+
+def _word_set(sentence: str) -> set[str]:
+    return set(sentence.lower().split())
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
 def sentence_diff(draft_body: str, sent_body: str) -> dict:
     """Sentence-level diff.
 
@@ -41,10 +63,25 @@ def sentence_diff(draft_body: str, sent_body: str) -> dict:
             added.extend(after[j1:j2])
         elif tag == "replace":
             old, new = before[i1:i2], after[j1:j2]
-            for index in range(min(len(old), len(new))):
-                changed.append([old[index], new[index]])
-            removed.extend(old[len(new):])
-            added.extend(new[len(old):])
+            new_sets = [_word_set(s) for s in new]
+            used_new: set[int] = set()
+            for old_sentence in old:
+                old_set = _word_set(old_sentence)
+                best_j = None
+                best_score = 0.0
+                for j, new_set in enumerate(new_sets):
+                    if j in used_new:
+                        continue
+                    score = _jaccard(old_set, new_set)
+                    if score > best_score:
+                        best_score = score
+                        best_j = j
+                if best_j is not None and best_score >= PAIR_SIMILARITY_FLOOR:
+                    changed.append([old_sentence, new[best_j]])
+                    used_new.add(best_j)
+                else:
+                    removed.append(old_sentence)
+            added.extend(new[j] for j in range(len(new)) if j not in used_new)
     return {"removed": removed, "added": added, "changed": changed}
 
 
@@ -70,12 +107,34 @@ def structural_deltas(draft: dict, sent: dict) -> dict:
 
 
 def metric_deltas(draft: dict, sent: dict, baseline: dict) -> dict:
-    """Sent minus draft, over every scalar metric aggregate() produces."""
+    """Sent minus draft, over every scalar metric present on both sides.
+
+    A metric absent from one side (e.g. a message with no ask has no
+    ask_placement_median at all, not an ask_placement_median of 0) is not
+    comparable as a delta — see metrics_one_sided() for those.
+    """
     before = flatten(aggregate([draft], baseline))
     after = flatten(aggregate([sent], baseline))
     return {
         key: round(after[key] - before[key], 4)
         for key in before.keys() & after.keys()
+    }
+
+
+def metrics_one_sided(draft: dict, sent: dict, baseline: dict) -> dict:
+    """Metrics that exist on only one side, verbatim, nothing fabricated.
+
+    Defaulting an absent metric to 0.0 would invent a signal — e.g. reporting
+    "no ask at all" as "ask moved to position 0.0". Instead each one-sided
+    metric reports both raw values, with the missing side as None/null so a
+    consumer can tell "went from 0.71 to no ask at all" from "went from 0.71
+    to 0.2".
+    """
+    before = flatten(aggregate([draft], baseline))
+    after = flatten(aggregate([sent], baseline))
+    return {
+        key: {"draft": before.get(key), "sent": after.get(key)}
+        for key in before.keys() ^ after.keys()
     }
 
 
@@ -86,6 +145,7 @@ def diff(draft: dict, sent: dict, baseline: dict) -> dict:
         "similarity": round(score, 4),
         "structural": structural_deltas(draft, sent),
         "metrics": metric_deltas(draft, sent, baseline),
+        "metrics_one_sided": metrics_one_sided(draft, sent, baseline),
         "sentences": sentence_diff(draft.get("body", ""), sent.get("body", "")),
     }
 
