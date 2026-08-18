@@ -3,12 +3,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
 DEFAULT_LOG = Path.home() / ".claude" / "wam" / "drafts.jsonl"
 RETENTION_DAYS = 30
 STATUSES = ("pending", "matched", "expired", "ambiguous")
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from ingest import shingles  # noqa: E402
+
+MATCH_THRESHOLD = 0.5
+REWRITE_THRESHOLD = 0.25
 
 
 def _parse(stamp: str) -> datetime | None:
@@ -125,3 +133,52 @@ def expire_old(
 
 def pending(drafts: list[dict]) -> list[dict]:
     return [d for d in drafts if d.get("status") == "pending"]
+
+
+def similarity(a: str, b: str) -> float:
+    """Shingle Jaccard, the same measure dedupe() uses."""
+    if not a.strip() or not b.strip():
+        return 0.0
+    left, right = shingles(a), shingles(b)
+    union = left | right
+    return len(left & right) / len(union) if union else 0.0
+
+
+def find_match(draft: dict, sent: list[dict]) -> tuple[str, list[dict]]:
+    """Find the sent message a draft became.
+
+    Fails closed: two plausible candidates return "ambiguous" rather than a
+    guess, because learning from the wrong message teaches the profile from
+    someone else's writing.
+    """
+    created = _parse(draft.get("created", ""))
+    recipients = {r.lower() for r in draft.get("recipients") or []}
+    subject = (draft.get("subject") or "").strip()
+
+    window = []
+    for message in sent:
+        when = _parse(message.get("date", ""))
+        if created is not None and when is not None and when < created:
+            continue
+        if recipients:
+            theirs = {r.lower() for r in message.get("recipients") or []}
+            if not (recipients & theirs):
+                continue
+        window.append(message)
+
+    exact = [m for m in window if (m.get("subject") or "").strip() == subject]
+    if exact:
+        return ("ambiguous", exact) if len(exact) > 1 else ("matched", exact)
+
+    # No recipient means the time window is the only other filter, so the
+    # fuzzy path has nothing left to disambiguate with. Require exact only.
+    if not recipients:
+        return ("none", [])
+
+    near = [
+        m for m in window
+        if similarity(draft.get("body", ""), m.get("body", "")) >= MATCH_THRESHOLD
+    ]
+    if not near:
+        return ("none", [])
+    return ("ambiguous", near) if len(near) > 1 else ("matched", near)

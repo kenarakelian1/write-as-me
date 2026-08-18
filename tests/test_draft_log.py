@@ -125,3 +125,90 @@ def test_set_status_preserves_corrupt_lines(tmp_path):
     drafts = load_drafts(log)
     assert len(drafts) == 1
     assert drafts[0]["status"] == "matched"
+
+
+from draft_log import (  # noqa: E402
+    MATCH_THRESHOLD,
+    REWRITE_THRESHOLD,
+    find_match,
+    similarity,
+)
+
+DRAFT = {
+    "id": "d-1",
+    "created": "2026-08-18T09:00:00-04:00",
+    "recipients": ["caden@example.com"],
+    "subject": "Listings - what changes",
+    "body": "Caden,\n\nI am narrowing what I do on directory listings. "
+            "Monthly I check each property and send you what is wrong.",
+}
+
+
+def _sent(subject, body, recipients=("caden@example.com",),
+          date="2026-08-18T10:00:00-04:00"):
+    return {"subject": subject, "body": body,
+            "recipients": list(recipients), "date": date}
+
+
+def test_similarity_is_one_for_identical_text():
+    assert similarity("a b c d e f", "a b c d e f") == 1.0
+
+
+def test_similarity_is_zero_when_either_side_is_empty():
+    assert similarity("", "a b c d e f") == 0.0
+
+
+def test_exact_subject_and_recipient_matches():
+    sent = [_sent("Listings - what changes", DRAFT["body"])]
+    status, hits = find_match(DRAFT, sent)
+    assert status == "matched"
+    assert hits[0]["subject"] == "Listings - what changes"
+
+
+def test_message_sent_before_the_draft_is_not_a_candidate():
+    sent = [_sent("Listings - what changes", DRAFT["body"],
+                  date="2026-08-17T10:00:00-04:00")]
+    assert find_match(DRAFT, sent)[0] == "none"
+
+
+def test_message_to_a_different_recipient_is_not_a_candidate():
+    sent = [_sent("Listings - what changes", DRAFT["body"],
+                  recipients=("someone-else@example.com",))]
+    assert find_match(DRAFT, sent)[0] == "none"
+
+
+def test_edited_subject_falls_back_to_body_similarity():
+    sent = [_sent("Listings update", DRAFT["body"] + " One more line here.")]
+    status, hits = find_match(DRAFT, sent)
+    assert status == "matched"
+    assert hits[0]["subject"] == "Listings update"
+
+
+def test_unrelated_body_with_edited_subject_is_not_a_match():
+    sent = [_sent("Something else", "Totally unrelated text about lunch plans.")]
+    assert find_match(DRAFT, sent)[0] == "none"
+
+
+def test_two_candidates_are_ambiguous_not_a_guess():
+    sent = [
+        _sent("Listings - what changes", DRAFT["body"]),
+        _sent("Listings - what changes", DRAFT["body"] + " extra"),
+    ]
+    status, hits = find_match(DRAFT, sent)
+    assert status == "ambiguous"
+    assert len(hits) == 2
+
+
+def test_draft_with_no_recipient_requires_an_exact_subject():
+    """Without a recipient the shingle fallback loses its disambiguation, so
+    only an exact subject is safe."""
+    draft = {**DRAFT, "recipients": []}
+    assert find_match(draft, [_sent("Listings update", DRAFT["body"],
+                                    recipients=())])[0] == "none"
+    assert find_match(draft, [_sent("Listings - what changes", DRAFT["body"],
+                                    recipients=())])[0] == "matched"
+
+
+def test_thresholds_are_the_spec_values():
+    assert MATCH_THRESHOLD == 0.5
+    assert REWRITE_THRESHOLD == 0.25

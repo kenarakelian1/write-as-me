@@ -301,11 +301,15 @@ def normalize(msg: EmailMessage, user_email: str) -> dict | None:
     }
 
 
-def _shingles(text: str, size: int = 5) -> set[str]:
+def shingles(text: str, size: int = 5) -> set[str]:
     words = re.findall(r"[a-z']+", text.lower())
     if len(words) < size:
         return {" ".join(words)}
     return {" ".join(words[i : i + size]) for i in range(len(words) - size + 1)}
+
+
+# Historical name, kept so existing imports keep working.
+_shingles = shingles
 
 
 # 0.70, not 0.85: measured template pairs (same boilerplate, only name/company
@@ -318,15 +322,15 @@ def _shingles(text: str, size: int = 5) -> set[str]:
 def dedupe(messages: list[dict], threshold: float = 0.70) -> list[dict]:
     kept: list[tuple[dict, set[str]]] = []
     for msg in messages:
-        shingles = _shingles(msg["body"])
+        msg_shingles = _shingles(msg["body"])
         duplicate = False
         for _, existing in kept:
-            union = shingles | existing
-            if union and len(shingles & existing) / len(union) >= threshold:
+            union = msg_shingles | existing
+            if union and len(msg_shingles & existing) / len(union) >= threshold:
                 duplicate = True
                 break
         if not duplicate:
-            kept.append((msg, shingles))
+            kept.append((msg, msg_shingles))
     return [msg for msg, _ in kept]
 
 
