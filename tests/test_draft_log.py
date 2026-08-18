@@ -212,3 +212,89 @@ def test_draft_with_no_recipient_requires_an_exact_subject():
 def test_thresholds_are_the_spec_values():
     assert MATCH_THRESHOLD == 0.5
     assert REWRITE_THRESHOLD == 0.25
+
+
+# --- Fix round 1: both routes must feed one candidate set, not a tie-break ---
+
+
+def test_exact_subject_bucket_does_not_hide_a_fuzzy_ambiguity():
+    """An exact-subject hit with a dissimilar body must not shadow a
+    different-subject candidate whose body is a near-identical match."""
+    sent = [
+        _sent("Listings - what changes", "Totally unrelated text about lunch plans."),
+        _sent("Something else entirely", DRAFT["body"]),
+    ]
+    status, hits = find_match(DRAFT, sent)
+    assert status == "ambiguous"
+    assert len(hits) == 2
+
+
+def test_three_exact_subject_candidates_are_ambiguous():
+    sent = [
+        _sent("Listings - what changes", DRAFT["body"]),
+        _sent("Listings - what changes", DRAFT["body"] + " one"),
+        _sent("Listings - what changes", DRAFT["body"] + " two"),
+    ]
+    status, hits = find_match(DRAFT, sent)
+    assert status == "ambiguous"
+    assert len(hits) == 3
+
+
+def test_two_fuzzy_candidates_are_ambiguous_even_when_one_is_more_similar():
+    """No tie-break on similarity score: both clear MATCH_THRESHOLD, so both
+    are candidates, even though they are not equally similar."""
+    close = DRAFT["body"] + " One more line here."
+    farther = DRAFT["body"] + " One more line here with several extra words tacked on at the end."
+    assert similarity(DRAFT["body"], close) != similarity(DRAFT["body"], farther)
+    assert similarity(DRAFT["body"], close) >= MATCH_THRESHOLD
+    assert similarity(DRAFT["body"], farther) >= MATCH_THRESHOLD
+    sent = [
+        _sent("Different subject one", close),
+        _sent("Different subject two", farther),
+    ]
+    status, hits = find_match(DRAFT, sent)
+    assert status == "ambiguous"
+    assert len(hits) == 2
+
+
+def test_draft_with_unparseable_created_is_not_matched():
+    draft = {**DRAFT, "created": "not-a-date"}
+    sent = [_sent("Listings - what changes", DRAFT["body"])]
+    assert find_match(draft, sent)[0] == "none"
+
+
+def test_message_with_unparseable_date_is_excluded():
+    sent = [_sent("Listings - what changes", DRAFT["body"], date="not-a-date")]
+    assert find_match(DRAFT, sent)[0] == "none"
+
+
+def test_message_sent_at_exactly_the_draft_created_timestamp_is_a_candidate():
+    sent = [_sent("Listings - what changes", DRAFT["body"], date=DRAFT["created"])]
+    status, hits = find_match(DRAFT, sent)
+    assert status == "matched"
+
+
+def test_none_and_empty_recipients_do_not_crash():
+    draft = {**DRAFT, "recipients": [None, "", "caden@example.com"]}
+    sent = [_sent("Listings - what changes", DRAFT["body"],
+                  recipients=(None, "", "caden@example.com"))]
+    status, hits = find_match(draft, sent)
+    assert status == "matched"
+
+
+def test_subject_matching_is_case_and_whitespace_insensitive():
+    """The no-recipient path is the one the design calls safe, so it must not
+    miss a match that differs only in case or surrounding whitespace."""
+    draft = {**DRAFT, "recipients": []}
+    sent = [_sent("  LISTINGS - WHAT CHANGES  ", DRAFT["body"], recipients=())]
+    status, hits = find_match(draft, sent)
+    assert status == "matched"
+
+
+def test_message_qualifying_both_ways_counts_once():
+    """A message with an exact subject match that is also highly similar in
+    body must appear once in the candidate set, not twice."""
+    sent = [_sent("Listings - what changes", DRAFT["body"])]
+    status, hits = find_match(DRAFT, sent)
+    assert status == "matched"
+    assert len(hits) == 1

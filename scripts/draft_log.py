@@ -144,41 +144,70 @@ def similarity(a: str, b: str) -> float:
     return len(left & right) / len(union) if union else 0.0
 
 
+def _clean_addresses(values) -> set[str]:
+    """Lowercased, non-empty string addresses only. A None or non-string
+    entry is dropped rather than raised on: a malformed recipient list must
+    not crash review mode, and a dropped entry cannot spuriously widen a
+    match either."""
+    return {v.lower() for v in (values or []) if isinstance(v, str) and v}
+
+
 def find_match(draft: dict, sent: list[dict]) -> tuple[str, list[dict]]:
     """Find the sent message a draft became.
 
     Fails closed: two plausible candidates return "ambiguous" rather than a
     guess, because learning from the wrong message teaches the profile from
-    someone else's writing.
+    someone else's writing. Both the exact-subject route and the fuzzy-body
+    route feed one shared candidate set, so a strong exact-subject hit can
+    never quietly outrank — and hide — an equally plausible fuzzy hit found
+    under a different subject.
     """
     created = _parse(draft.get("created", ""))
-    recipients = {r.lower() for r in draft.get("recipients") or []}
-    subject = (draft.get("subject") or "").strip()
+    if created is None:
+        # No way to bound the candidate window without a parseable creation
+        # time, so there is no time evidence to match on at all.
+        return ("none", [])
+
+    recipients = _clean_addresses(draft.get("recipients"))
+    subject_cf = (draft.get("subject") or "").strip().casefold()
 
     window = []
     for message in sent:
         when = _parse(message.get("date", ""))
-        if created is not None and when is not None and when < created:
+        if when is None or when < created:
+            # An unparseable message date cannot be shown to be on or after
+            # the draft's creation time, so it is excluded rather than
+            # assumed in-window.
             continue
         if recipients:
-            theirs = {r.lower() for r in message.get("recipients") or []}
+            theirs = _clean_addresses(message.get("recipients"))
             if not (recipients & theirs):
                 continue
         window.append(message)
 
-    exact = [m for m in window if (m.get("subject") or "").strip() == subject]
-    if exact:
-        return ("ambiguous", exact) if len(exact) > 1 else ("matched", exact)
+    exact_idx = {
+        i for i, m in enumerate(window)
+        if (m.get("subject") or "").strip().casefold() == subject_cf
+    }
 
     # No recipient means the time window is the only other filter, so the
     # fuzzy path has nothing left to disambiguate with. Require exact only.
     if not recipients:
-        return ("none", [])
+        exact = [window[i] for i in sorted(exact_idx)]
+        if not exact:
+            return ("none", [])
+        return ("ambiguous", exact) if len(exact) > 1 else ("matched", exact)
 
-    near = [
-        m for m in window
+    fuzzy_idx = {
+        i for i, m in enumerate(window)
         if similarity(draft.get("body", ""), m.get("body", "")) >= MATCH_THRESHOLD
-    ]
-    if not near:
+    }
+
+    # Union by index, not by dict equality: sent-message dicts are not
+    # hashable, and two distinct messages could compare equal, so a message
+    # that qualifies via both routes must still count as one candidate.
+    candidate_idx = sorted(exact_idx | fuzzy_idx)
+    candidates = [window[i] for i in candidate_idx]
+    if not candidates:
         return ("none", [])
-    return ("ambiguous", near) if len(near) > 1 else ("matched", near)
+    return ("ambiguous", candidates) if len(candidates) > 1 else ("matched", candidates)
