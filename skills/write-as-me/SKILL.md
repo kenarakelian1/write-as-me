@@ -1,17 +1,41 @@
 ---
 name: write-as-me
-description: Use when the user wants email written in their own voice, wants to analyze their writing style, or asks to build or refresh a personal style profile. Triggers on "write as me", "in my voice", "sounds like me", "draft this email", "/wam".
+description: Use when the user wants email written in their own voice, wants to analyze their writing style, asks to build or refresh a personal style profile, or wants to review drafts they've sent and learn from their edits. Triggers on "write as me", "in my voice", "sounds like me", "draft this email", "review my drafts", "learn from my edits", "/wam", "/wam review".
 ---
 
 # write-as-me
 
-Two modes. Pick by whether the user supplied an intent.
+Three modes. Pick by whether the user supplied an intent, asked for a review,
+or neither.
 
 | Invocation | Mode |
 | --- | --- |
 | `/write-as-me` or `/wam`, no arguments | **Analyze** — build the style profile |
+| `/write-as-me review` or `/wam review` | **Review** — learn from edits made to sent drafts |
 | `/write-as-me <what to say>` | **Write** — draft using the existing profile |
 | `--refresh` present | **Analyze**, overwriting the existing profile |
+
+## Before either mode — the pending-edit check
+
+Run once at the start of every invocation, before doing what the user asked:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --list-pending --now "<ISO-8601 NOW>"
+```
+
+For each pending draft, check whether it has since been sent (see review mode's
+matching step). If any have, say **exactly one line** and then carry on with the
+user's actual request:
+
+> 2 drafts you sent have edits I haven't learned from — review them?
+
+Rules:
+- Never block. The user asked for something; this check does not get to
+  postpone it.
+- If they decline, do not raise it again in this session.
+- If no Gmail tools are available, say once that the edit loop cannot run
+  without them, and never mention it again.
+- If `drafts.jsonl` is missing or unreadable, treat it as empty and say nothing.
 
 Profiles live in `~/.claude/wam/`. Never write a profile into a repository.
 
@@ -360,3 +384,233 @@ create the draft without being asked.
 
 **Never send email.** Creating a draft is the furthest this skill goes, and only when
 the user explicitly asks for one.
+
+### Step 6 — Log the draft
+
+After presenting, record it so review mode can find the sent version later:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --record \
+  --register <REGISTER> --recipients "<COMMA SEPARATED>" \
+  --subject "<SUBJECT>" --body-file <TEMP FILE> --created "<ISO-8601 NOW>"
+```
+
+Write the body to a temp file rather than passing it as an argument — draft
+bodies contain newlines and quotes that do not survive a shell argument.
+
+If the recipient was never supplied and the draft uses the `Hi [Name],`
+placeholder, pass `--recipients ""`. Review mode will then require an exact
+subject match, which is the safe behaviour when there is no recipient to
+disambiguate with.
+
+Logging is best-effort: if it fails, say so in one line and move on. A failed
+log must never cost the user the draft they asked for.
+
+## Review mode
+
+Triggered by `/wam review`, or by the user accepting the pending-edit offer.
+
+If `~/.claude/wam/default.md` does not exist, there is nothing to update — say
+so and offer analyze mode instead.
+
+### Every intermediate file goes in `~/.claude/wam/tmp/`, never the project
+
+Review mode necessarily handles verbatim sent-mail text — the fetched sent
+message, the draft/candidate JSON handed to `--match`, and the diff file
+`diff_draft.py` writes all contain real sentences the user wrote. None of that
+may ever land in the user's working directory, the same rule the rest of this
+skill already follows for `~/.claude/wam/cache/`.
+
+Every temp file this mode creates (draft JSON, candidates JSON, sent-message
+JSON, the diff output) MUST be written under `~/.claude/wam/tmp/`, created if
+missing. At the end of a review run — including a run that stops early because
+the user declines, an `ambiguous` match is never resolved, or an error occurs —
+delete `~/.claude/wam/tmp/` entirely. Treat this cleanup as unconditional, the
+same way Analyze mode's Step 6 always deletes `~/.claude/wam/cache/`.
+
+### Step 1 — Find the sent versions
+
+List pending drafts. This call is intentionally compact — it feeds the
+one-line non-blocking check and must never pull draft bodies into context:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --list-pending --now "<ISO-8601 NOW>"
+```
+
+Each line is `{"id", "created", "register", "recipients", "subject"}` —
+no `body`. Before matching, fetch the complete record for each pending draft,
+which includes the body that matching and diffing both need:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --get --draft-id <ID>
+```
+
+Then search `in:sent` for its subject, restricted to messages sent after the
+draft's `created` timestamp and addressed to one of its recipients. Build each
+candidate as `{"subject", "body", "recipients", "date"}` — all four keys,
+`body` populated with the full message text, not left out or empty. Write the
+draft record (from `--get`, unmodified) and the candidate list to
+`~/.claude/wam/tmp/draft-<ID>.json` and `~/.claude/wam/tmp/candidates-<ID>.json`,
+and let the matcher decide — do not decide by eye:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --match \
+  --draft-file ~/.claude/wam/tmp/draft-<ID>.json \
+  --candidates-file ~/.claude/wam/tmp/candidates-<ID>.json
+```
+
+A draft record with no `body` breaks matching silently rather than loudly: the
+fuzzy-body fallback (`similarity()` against an empty string) always scores
+0.0, so an edited-subject match that should fall back to the body simply never
+fires. Always use the `--get` output, never the compact `--list-pending` line,
+as the `--draft-file` input.
+
+It prints `{"status": ..., "candidates": [...]}` where status is `matched`,
+`ambiguous`, or `none`.
+
+- `matched` — proceed to Step 2 using the one candidate as the sent file.
+- `ambiguous` — show the user the candidate subjects and dates and ask which,
+  if any. Never pick one yourself: learning from the wrong message teaches the
+  profile from someone else's writing. If the user identifies one, proceed to
+  Step 2 with it. If none of the candidates is the right message, mark the
+  draft so it stops being re-offered:
+  ```bash
+  python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --set-status \
+    --draft-id <ID> --status ambiguous
+  ```
+- `none` — leave it `pending`. It expires on its own at 30 days. Say nothing.
+
+### Step 2 — Measure the change
+
+`diff_draft.py`'s `--draft` and `--sent` files must each carry, at minimum,
+`subject` and `body` — the same shape `--get` and a Gmail-fetched sent message
+already produce. A record missing `body` fails with `KeyError: 'body'` rather
+than a readable error, so never hand it a `--list-pending` line or a
+partial record.
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/diff_draft.py \
+  --draft ~/.claude/wam/tmp/draft-<ID>.json --sent ~/.claude/wam/tmp/sent-<ID>.json \
+  --baseline ${CLAUDE_PLUGIN_ROOT}/fixtures/baseline_ngrams.json \
+  --out ~/.claude/wam/tmp/diff-<ID>.json
+```
+
+If `classification` is `rewritten`, record it and derive nothing:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/edit_log.py --record \
+  --draft-id <ID> --classification rewritten --reviewed "<ISO-8601 NOW>"
+```
+
+Then mark the draft `matched` (it has been reviewed and resolved, even though
+no observations came out of it) — same command as Step 6 — and tell the user
+plainly that they replaced rather than edited that draft, and that a run of
+rewrites means the profile is wrong at the root — re-running analyze mode
+will serve them better than incremental learning.
+
+### Step 3 — Classify every change
+
+Read the diff file. For each removed sentence, added sentence, changed pair, and
+non-trivial metric delta, decide which of three buckets it belongs in:
+
+- **Factual** — a number, name, date, link, or fact changed, or content added
+  that you could not have known. Record it in `factual_changes`. **It never
+  becomes a profile directive.** The profile describes how the user writes, not
+  what they know.
+- **Voice** — a hedge removed, a sentence cut with no loss of information, an
+  opener or signoff changed, a length cut, a structural change.
+- **Neutral** — typo fixes, whitespace, reformatting. Ignore.
+
+A single changed pair can be factual only, voice only, or both at once folded
+into one sentence. Three examples — none of these sentences appear in this
+skill's own fixtures, so treat them as illustrations of the rule, not answers
+to copy:
+
+- Factual only: "The renewal fee is $1,800" → "The renewal fee is $1,850" —
+  only the number moved; the phrasing is untouched.
+- Voice only: "I wanted to check in and see how things are progressing" →
+  "How's it going?" — nothing about the facts changed, only the phrasing and
+  length.
+- Both, in one sentence: "I just wanted to let you know the shipment left the
+  warehouse on the 9th" → "The shipment left the warehouse on the 11th." Two
+  verdicts live in that one changed pair: the hedge "I just wanted to let you
+  know" is cut (voice, dimension `hedging`), and the date moved from the 9th
+  to the 11th (factual, goes to `factual_changes` and never becomes a
+  directive). Record both. A single changed pair is not automatically a
+  single verdict — read every changed pair for both kinds of edit before
+  moving to the next one, even when it looks like one clean substitution.
+
+A metric delta is not automatically its own observation, separate from the
+sentence-level changes above. Check it against what you already classified:
+if a delta is fully explained by a sentence change you already recorded —
+cutting a closing-offer sentence also drops `word_count` and
+`paragraph_count`, but that is one edit, not three — do not log a second
+observation for it. A metric delta earns its own observation only when it
+reflects something the sentence diff does not already explain: a punctuation
+rate shifted across the whole email, a contraction-rate change, an opener or
+signoff swap with no corresponding sentence entry. Counting one edit twice
+hands promotion two votes for a single behavior, which quietly defeats the
+two-independent-drafts rule the rest of this design rests on.
+
+### Step 4 — Record observations
+
+Each voice change becomes one observation with a dimension from the closed
+vocabulary — `length`, `hedging`, `opener`, `signoff`, `ask_placement`,
+`structure`, `punctuation`, `contractions`, `formality`, `closing_offer` — a
+direction of `reduce`, `increase`, or `replace:<value>`, and **verbatim
+evidence**. Paraphrased evidence is worthless later: the whole point is showing
+the user the actual sentence they cut.
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/edit_log.py --record \
+  --draft-id <ID> --classification edited --reviewed "<ISO-8601 NOW>" \
+  --observations-file <JSON FILE> --factual-file <JSON FILE>
+```
+
+The recorder rejects a dimension outside the vocabulary. That is deliberate:
+free-text labels would never match each other and nothing would ever promote.
+If a change genuinely does not fit any dimension, drop it rather than inventing
+a label.
+
+### Step 5 — Propose what has earned promotion
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/edit_log.py --promotable
+```
+
+This returns only dimensions with two or more observations from **separate
+drafts** pointing the same way. Present each one on its own:
+
+- State the proposed profile line.
+- Show **both** pieces of verbatim evidence.
+- If it contradicts a directive the profile measured from the corpus, say so
+  and show both figures. Two edits do not silently overrule sixteen emails.
+- Ask. One approval per change — never a batch yes.
+
+### Step 6 — Apply approved changes
+
+Edit `~/.claude/wam/default.md`, tagging every learned line with provenance:
+
+```markdown
+- Cut the closing offer sentence; you delete it. (learned from 2 edits, 2026-08-18)
+```
+
+Provenance is required. A directive resting on two edits is weaker evidence than
+one resting on the whole corpus, and the profile must not present them as equal.
+The tag also lets the user strip learned lines wholesale if the loop drifts.
+
+Then mark each reviewed draft `matched`, one call per draft:
+
+```bash
+python ${CLAUDE_PLUGIN_ROOT}/scripts/draft_log.py --set-status \
+  --draft-id <ID> --status matched
+```
+
+This is not optional bookkeeping: without it the draft stays `pending`
+forever, the pending-edit check re-nags about it for the rest of its 30-day
+retention window, and reviewing it again would append duplicate observations
+to `edits.jsonl`.
+
+Finally, delete `~/.claude/wam/tmp/` (see the note at the top of this mode),
+and report: how many drafts were reviewed, how many changes were factual, how
+many observations were recorded, and how many are still short of promotion.

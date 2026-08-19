@@ -1,0 +1,10 @@
+{
+  "subject": "August invoice",
+  "body": "Hi Priya,\n\nThe invoice came to $4,250 for August's usage. Let me know if that lines up with what you have on your end.\n\nBest,\nDana Reyes",
+  "word_count": 27,
+  "date": "2026-08-18T11:15:00-04:00",
+  "to_domains": ["harborline.com"],
+  "recipient_count": 1,
+  "is_reply": false,
+  "id": "sent-mixed-1"
+}

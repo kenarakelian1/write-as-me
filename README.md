@@ -73,6 +73,50 @@ in the profile, while preserving your own first name and the rhythm of the
 original text. A corpus under 12 usable messages is refused outright,
 rather than producing a profile built on too little signal.
 
+## Learning from your edits
+
+Write mode is not the end of the loop. Every draft wam produces is recorded,
+so the next time you invoke `/write-as-me` or `/wam`, it can check whether
+that draft was sent and, if you edited it before sending, learn from the
+difference.
+
+Review mode (`/wam review`) finds the sent version by searching your sent
+mail for the draft's subject, narrowed to messages sent after the draft was
+created and addressed to one of its recipients. When more than one message
+could plausibly be the one you sent, it shows you the candidates and asks
+which one — it never guesses, because learning from the wrong message would
+teach the profile from someone else's writing.
+
+Only style edits update the profile. A wording change, a cut hedge, a
+trimmed sentence, a different opener or signoff — these get recorded as
+observations. A factual correction — a fixed date, a corrected figure, a
+changed name — never does, because the profile describes how you write, not
+what you know.
+
+No single edit changes the profile. A dimension needs two independent
+edits, from two separate drafts, pointing the same way before wam proposes
+anything, and every proposal is shown and approved one at a time — never a
+batch "yes to all." Once a change is approved, the line it adds to
+`~/.claude/wam/default.md` is tagged with its provenance (e.g. "learned from
+2 edits, 2026-08-18") so you can always tell a learned line from one
+measured off the full corpus, and strip the learned ones if the loop ever
+drifts.
+
+Privacy for this loop works the same way as the rest of wam:
+`~/.claude/wam/drafts.jsonl` holds the full text of the drafts wam produced,
+kept for 30 days and then dropped automatically. The sent message fetched for
+comparison, the candidate list handed to the matcher, and the diff between
+draft and sent text are all written briefly to `~/.claude/wam/tmp/` — never
+into the project working directory — and that directory is deleted at the
+end of every review run, including a run that stops early.
+
+The scripts behind this loop (`draft_log.py`, `diff_draft.py`, `edit_log.py`)
+are covered by the automated test suite, but the Gmail search, the
+draft-to-sent matching, and `/wam review` itself have not been exercised end
+to end against a real mailbox — no subagent can drive an interactive slash
+command, so this loop has only been verified one script at a time, not as a
+whole.
+
 ## Privacy
 
 Your generated profile contains excerpts of your real email, redacted but

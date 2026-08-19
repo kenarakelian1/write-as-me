@@ -337,7 +337,7 @@ def test_consumer_domain_user_still_classifies_business_mail():
 
 def test_cc_to_a_consumer_domain_does_not_hijack_the_register():
     """A business message that CCs one Gmail address is still business mail."""
-    msg = {"to_domains": ["codediv.com", "gmail.com"], "is_reply": False,
+    msg = {"to_domains": ["harborline.com", "gmail.com"], "is_reply": False,
            "body": "x", "subject": ""}
     assert classify_register(msg, "gmail.com", False) == "client"
 
