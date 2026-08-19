@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import re
 import sys
 from pathlib import Path
+from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -44,6 +46,55 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b)
 
 
+# A mail client is not an editor. Gmail rewraps lines on send and rewrites bare
+# URLs into click-tracking redirects, so a naive comparison reports both as
+# edits the user never made. On the first real round-trip through this pipeline,
+# three of the four detected "changes" were artifacts of exactly these two
+# behaviours, and only one was a genuine edit. Normalizing them away is
+# deterministic; leaving them in asks a model to sift noise that never had to
+# reach it.
+GMAIL_TRACKING_URL = re.compile(r"https?://(?:www\.)?google\.com/url\?q=([^&\s]+)\S*")
+LIST_ITEM = re.compile(r"^([-*•]|\d+[.)])\s")
+
+
+def unwrap_tracking_urls(text: str) -> str:
+    """Recover the target of a Gmail click-tracking redirect."""
+    return GMAIL_TRACKING_URL.sub(lambda m: unquote(m.group(1)), text)
+
+
+def normalize_wrapping(text: str) -> str:
+    """Join lines a mail client soft-wrapped, without flattening structure.
+
+    Paragraph breaks survive, and so does any line that begins a list item —
+    collapsing those would merge a bulleted list onto one line and silently
+    zero out the bullet_rate metric.
+    """
+    out_paragraphs = []
+    for paragraph in re.split(r"\n\s*\n", text):
+        lines: list[str] = []
+        for raw in paragraph.split("\n"):
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            if not lines or LIST_ITEM.match(stripped):
+                lines.append(stripped)
+            else:
+                lines[-1] = f"{lines[-1]} {stripped}"
+        out_paragraphs.append("\n".join(lines))
+    return "\n\n".join(out_paragraphs)
+
+
+# Gmail also supplies a scheme the user never typed: a bare "github.com/x" comes
+# back as "http://github.com/x" inside the redirect. For edit detection the two
+# are the same link, so the scheme is dropped on both sides. This applies only to
+# text being compared, never to anything shown to the user.
+URL_SCHEME = re.compile(r"\bhttps?://")
+
+
+def _for_comparison(body: str) -> str:
+    return normalize_wrapping(URL_SCHEME.sub("", unwrap_tracking_urls(body)))
+
+
 def sentence_diff(draft_body: str, sent_body: str) -> dict:
     """Sentence-level diff.
 
@@ -51,7 +102,12 @@ def sentence_diff(draft_body: str, sent_body: str) -> dict:
     produces — "cut 'Happy to jump on a call'" is actionable in a way that
     "bullet rate fell 0.04" is not.
     """
-    before, after = sentences(draft_body), sentences(sent_body)
+    # Normalization is scoped to the sentence diff on purpose. structural_deltas
+    # reads raw line structure — closer_pattern inspects the last two lines to
+    # tell "Best,\nDana Reyes" from a bare signoff — so normalizing there would
+    # break signoff detection.
+    before = sentences(_for_comparison(draft_body))
+    after = sentences(_for_comparison(sent_body))
     matcher = difflib.SequenceMatcher(a=before, b=after, autojunk=False)
     removed: list[str] = []
     added: list[str] = []

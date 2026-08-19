@@ -181,3 +181,69 @@ def test_cli_writes_a_diff_file(tmp_path):
     data = json.loads(out.read_text(encoding="utf-8"))
     assert set(data) == {"classification", "similarity", "structural",
                          "metrics", "metrics_one_sided", "sentences"}
+
+
+# --- Mail-client artifacts (found on a real Gmail round-trip) ---
+
+from diff_draft import normalize_wrapping, unwrap_tracking_urls  # noqa: E402
+
+
+def test_soft_line_rewrap_is_not_an_edit():
+    """Gmail rewraps lines on send. The words are identical and only the
+    newline positions moved, but a naive diff reports it as a changed
+    sentence — on a real round-trip 3 of 4 detected changes were this."""
+    draft = "It reads my sent mail and works out how I\nactually write today."
+    sent = "It reads my sent mail and works out how\nI actually write today."
+    result = sentence_diff(draft, sent)
+    assert result == {"removed": [], "added": [], "changed": []}
+
+
+def test_gmail_url_rewriting_is_not_an_edit():
+    draft = "Look here: github.com/kenarakelian1/write-as-me"
+    sent = ("Look here: https://www.google.com/url?q=http://github.com/"
+            "kenarakelian1/write-as-me&source=gmail&ust=178724&sa=E")
+    assert sentence_diff(draft, sent)["changed"] == []
+
+
+def test_a_real_edit_still_survives_normalization():
+    draft = "Joe,\n\nI built a tool."
+    sent = "Hi Joe,\n\nI built a tool."
+    changed = sentence_diff(draft, sent)["changed"]
+    assert len(changed) == 1
+    assert changed[0][0].startswith("Joe,")
+    assert changed[0][1].startswith("Hi Joe,")
+
+
+def test_normalize_keeps_list_items_on_their_own_lines():
+    """Collapsing every newline would merge a bulleted list into one line and
+    silently zero out the bullet_rate metric."""
+    text = "Three things:\n- first item\n- second item\n- third item"
+    assert normalize_wrapping(text).count("\n") == 3
+
+
+def test_normalize_joins_a_wrapped_continuation_line():
+    assert normalize_wrapping("one two\nthree four") == "one two three four"
+
+
+def test_normalize_preserves_paragraph_breaks():
+    assert normalize_wrapping("one\ntwo\n\nthree") == "one two\n\nthree"
+
+
+def test_unwrap_tracking_url_recovers_the_target():
+    wrapped = ("https://www.google.com/url?q=http://example.com/x"
+               "&source=gmail&ust=123&sa=E")
+    assert unwrap_tracking_urls(wrapped) == "http://example.com/x"
+
+
+def test_unwrap_leaves_ordinary_urls_alone():
+    assert unwrap_tracking_urls("see https://example.com/a") == "see https://example.com/a"
+
+
+def test_structural_deltas_still_see_the_raw_line_structure(tmp_path):
+    """Normalization is scoped to the sentence diff. closer_pattern reads the
+    last two lines, so collapsing newlines there would break signoff detection."""
+    draft = {"subject": "s", "body": "Body text here.\n\nBest,\nDana Reyes"}
+    sent = {"subject": "s", "body": "Body text here.\n\nBest,\nDana Reyes"}
+    result = structural_deltas(draft, sent)
+    assert result["signoff"]["draft"]["signoff"] == "best"
+    assert result["signoff"]["draft"]["name_form"] == "full_name"
