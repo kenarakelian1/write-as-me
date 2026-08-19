@@ -75,10 +75,15 @@ rather than producing a profile built on too little signal.
 
 ## Learning from your edits
 
-Write mode is not the end of the loop. Every draft wam produces is recorded,
-so the next time you invoke `/write-as-me` or `/wam`, it can check whether
-that draft was sent and, if you edited it before sending, learn from the
-difference.
+Write mode is not the end of the loop. When your Gmail connector is available
+and the recipient is known, wam creates the draft in Gmail rather than only
+printing it — you edit it where you were going to edit it anyway, and send it
+from there. Every draft is also recorded locally, so the next time you invoke
+`/write-as-me` or `/wam`, it can check whether that draft was sent and, if you
+edited it before sending, learn from the difference. Pass `--no-draft` if you
+only want the text.
+
+It never sends. A draft sits in your mailbox until you choose to send it.
 
 Review mode (`/wam review`) finds the sent version by searching your sent
 mail for the draft's subject, narrowed to messages sent after the draft was

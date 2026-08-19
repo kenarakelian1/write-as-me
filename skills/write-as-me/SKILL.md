@@ -14,6 +14,10 @@ or neither.
 | `/write-as-me review` or `/wam review` | **Review** — learn from edits made to sent drafts |
 | `/write-as-me <what to say>` | **Write** — draft using the existing profile |
 | `--refresh` present | **Analyze**, overwriting the existing profile |
+| `--no-draft` present | **Write**, but present in chat only — no Gmail draft |
+
+Write mode creates a Gmail draft by default when a recipient address is known; see
+its Step 5 for the two cases that do not.
 
 ## Before either mode — the pending-edit check
 
@@ -379,11 +383,28 @@ never a checklist, a score, or a running commentary on what got fixed.
 
 Show subject and body as plain text, ready to copy. Add one line naming the register
 used — and, if the register was too thin to profile, say plainly that the baseline
-was used instead. If Gmail tools are available, offer to save it as a draft; do not
-create the draft without being asked.
+was used instead.
 
-**Never send email.** Creating a draft is the furthest this skill goes, and only when
-the user explicitly asks for one.
+**If Gmail tools are available and a recipient address is known, create the Gmail
+draft — do not ask first.** Report the draft id alongside the chat copy.
+
+This is deliberate, and it is what makes the edit-learning loop work. The user edits
+in Gmail, not in the terminal; a draft they have to request is a draft most of them
+will never request, and the loop then has nothing to learn from. Leaving creation
+opt-in put a question in front of the single step the whole feature depends on.
+
+Two cases do **not** create a draft:
+
+- **No recipient address.** If the draft carries the `Hi [Name],` placeholder, or the
+  user named a person without an address you can resolve, present in chat only and say
+  why — there is nothing to address it to. Do not guess an address; an email created
+  against the wrong person is worse than one not created at all.
+- **`--no-draft` was passed.** Present in chat only, for when the user wants text to
+  paste somewhere else.
+
+**Never send email.** Creating a draft is the furthest this skill goes. That boundary
+does not move: a draft sits in the user's mailbox until they choose to send it, and
+nothing in this skill may send on their behalf, whatever they ask for.
 
 ### Step 6 — Log the draft
 
