@@ -147,7 +147,9 @@ def _clean_addresses(values) -> set[str]:
     return {v.lower() for v in (values or []) if isinstance(v, str) and v}
 
 
-def find_match(draft: dict, sent: list[dict]) -> tuple[str, list[dict]]:
+def find_match(
+    draft: dict, sent: list[dict], user_email: str | None = None
+) -> tuple[str, list[dict]]:
     """Find the sent message a draft became.
 
     Fails closed: two plausible candidates return "ambiguous" rather than a
@@ -156,6 +158,19 @@ def find_match(draft: dict, sent: list[dict]) -> tuple[str, list[dict]]:
     route feed one shared candidate set, so a strong exact-subject hit can
     never quietly outrank — and hide — an equally plausible fuzzy hit found
     under a different subject.
+
+    `user_email` opens one narrow carve-out. Redirecting a draft to yourself
+    instead of its intended recipient is the natural way to try the feature,
+    and on real mail it silently cost a genuine edit signal: the recipients
+    did not overlap, so the matcher declined and the loop learned nothing.
+
+    The carve-out is principled rather than a loosening. The recipient guard
+    exists to stop the profile learning from a message someone else composed.
+    A message addressed solely to the user is, by definition, the user's own
+    composition, so that risk cannot arise. It stays narrow: the user must be
+    the *only* recipient (a message to them and someone else is ordinary
+    correspondence), the subject must match exactly, and the time window still
+    applies. Callers that pass no `user_email` behave exactly as before.
     """
     created = _parse(draft.get("created", ""))
     if created is None:
@@ -165,8 +180,12 @@ def find_match(draft: dict, sent: list[dict]) -> tuple[str, list[dict]]:
 
     recipients = _clean_addresses(draft.get("recipients"))
     subject_cf = (draft.get("subject") or "").strip().casefold()
+    self_only = _clean_addresses([user_email]) if user_email else set()
 
     window = []
+    # Indices into `window` for messages admitted only by the self-redirect
+    # carve-out. They are held to the exact-subject route alone.
+    self_redirect_idx: set[int] = set()
     for message in sent:
         when = _parse(message.get("date", ""))
         if when is None or when < created:
@@ -174,10 +193,13 @@ def find_match(draft: dict, sent: list[dict]) -> tuple[str, list[dict]]:
             # the draft's creation time, so it is excluded rather than
             # assumed in-window.
             continue
-        if recipients:
-            theirs = _clean_addresses(message.get("recipients"))
-            if not (recipients & theirs):
-                continue
+        theirs = _clean_addresses(message.get("recipients"))
+        overlaps = bool(recipients & theirs) if recipients else True
+        is_self_redirect = bool(self_only) and theirs == self_only
+        if not overlaps and not is_self_redirect:
+            continue
+        if not overlaps:
+            self_redirect_idx.add(len(window))
         window.append(message)
 
     exact_idx = {
@@ -193,9 +215,13 @@ def find_match(draft: dict, sent: list[dict]) -> tuple[str, list[dict]]:
             return ("none", [])
         return ("ambiguous", exact) if len(exact) > 1 else ("matched", exact)
 
+    # Self-redirected messages are excluded from the fuzzy route for the same
+    # reason the no-recipient case is: without a recipient signal there is
+    # nothing left to disambiguate a loose body match against.
     fuzzy_idx = {
         i for i, m in enumerate(window)
-        if similarity(draft.get("body", ""), m.get("body", "")) >= MATCH_THRESHOLD
+        if i not in self_redirect_idx
+        and similarity(draft.get("body", ""), m.get("body", "")) >= MATCH_THRESHOLD
     }
 
     # Union by index, not by dict equality: sent-message dicts are not
@@ -226,6 +252,9 @@ def main() -> int:
     ap.add_argument("--match", action="store_true")
     ap.add_argument("--draft-file", help="JSON draft record, for --match")
     ap.add_argument("--candidates-file", help="JSON list of sent messages, for --match")
+    ap.add_argument("--user", default="",
+                    help="The user's own address; enables the self-redirect "
+                         "carve-out on --match")
     ap.add_argument("--now", default="", help="ISO-8601; drives retention")
     ap.add_argument("--log", default=str(DEFAULT_LOG))
     args = ap.parse_args()
@@ -235,7 +264,7 @@ def main() -> int:
     if args.match:
         draft = json.loads(Path(args.draft_file).read_text(encoding="utf-8"))
         candidates = json.loads(Path(args.candidates_file).read_text(encoding="utf-8"))
-        status, hits = find_match(draft, candidates)
+        status, hits = find_match(draft, candidates, user_email=args.user or None)
         print(json.dumps({"status": status, "candidates": hits}, indent=2))
         return 0
 

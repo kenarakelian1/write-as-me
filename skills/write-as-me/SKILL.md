@@ -61,7 +61,7 @@ mode. Do not silently overwrite.
 Try in order and announce which tier you used.
 
 **Tier 1, Gmail connector.** If Gmail tools are available, search `in:sent -in:chats`
-over the last 12 months. Fetch up to 150 messages. Write them to
+over the last 6 months. Fetch up to 150 messages. Write them to
 `~/.claude/wam/cache/raw.json` as a JSON array of
 `{id, from, to, cc, subject, date, body}`.
 

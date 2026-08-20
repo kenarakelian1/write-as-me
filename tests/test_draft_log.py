@@ -485,3 +485,60 @@ def test_record_cli_requires_body_file(tmp_path):
     )
     assert result.returncode != 0
     assert not log.exists()
+
+
+# --- Redirect-to-self (found by using the loop on real mail) ---
+
+SELF = "me@example.com"
+
+
+def test_draft_redirected_to_self_matches_on_exact_subject():
+    """Sending a draft to yourself instead of its intended recipient is the
+    natural way to test, and it cost a real edit signal when the matcher
+    declined. Self-addressed sent mail is definitionally the user's own
+    composition, so matching it cannot teach a stranger's voice — the reason
+    the recipient guard exists does not apply."""
+    sent = [_sent("Listings - what changes", DRAFT["body"], recipients=(SELF,))]
+    status, hits = find_match(DRAFT, sent, user_email=SELF)
+    assert status == "matched"
+    assert hits[0]["recipients"] == [SELF]
+
+
+def test_redirect_to_self_still_requires_an_exact_subject():
+    """With the recipient signal gone, the fuzzy body route has nothing left
+    to disambiguate with, exactly as in the no-recipient case."""
+    sent = [_sent("Listings update", DRAFT["body"], recipients=(SELF,))]
+    assert find_match(DRAFT, sent, user_email=SELF)[0] == "none"
+
+
+def test_self_carve_out_needs_the_user_to_be_the_only_recipient():
+    """A message to the user AND someone else is ordinary correspondence and
+    must go through the normal recipient check."""
+    sent = [_sent("Listings - what changes", DRAFT["body"],
+                  recipients=(SELF, "stranger@example.com"))]
+    assert find_match(DRAFT, sent, user_email=SELF)[0] == "none"
+
+
+def test_self_carve_out_is_inert_without_a_user_email():
+    """Behaviour is unchanged for every existing caller that passes no user."""
+    sent = [_sent("Listings - what changes", DRAFT["body"], recipients=(SELF,))]
+    assert find_match(DRAFT, sent)[0] == "none"
+
+
+def test_self_carve_out_does_not_bypass_the_time_window():
+    sent = [_sent("Listings - what changes", DRAFT["body"], recipients=(SELF,),
+                  date="2026-08-17T10:00:00-04:00")]
+    assert find_match(DRAFT, sent, user_email=SELF)[0] == "none"
+
+
+def test_self_redirect_and_a_normal_hit_are_ambiguous_not_a_pick():
+    sent = [
+        _sent("Listings - what changes", DRAFT["body"]),
+        _sent("Listings - what changes", DRAFT["body"], recipients=(SELF,)),
+    ]
+    assert find_match(DRAFT, sent, user_email=SELF)[0] == "ambiguous"
+
+
+def test_normal_recipient_matching_is_unaffected_by_the_carve_out():
+    sent = [_sent("Listings - what changes", DRAFT["body"])]
+    assert find_match(DRAFT, sent, user_email=SELF)[0] == "matched"

@@ -46,7 +46,7 @@ install, no network calls from the scripts themselves.
 Analyze mode tries these in order and tells you which one it used:
 
 1. **Gmail connector.** If Gmail tools are available in your Claude Code
-   session, it searches `in:sent -in:chats` over the last 12 months and
+   session, it searches `in:sent -in:chats` over the last 6 months and
    pulls up to 150 messages directly.
 2. **Local export.** It looks for `.mbox` or `.eml` files in `./emails/`
    (or asks you for a path). Google Takeout, Outlook, and Apple Mail
